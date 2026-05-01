@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "空气质量电子植物"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "查看城市空气质量与电子植物"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "空气花园"
+    },
+    {
+      "name": "permission_location_reason",
+      "value": "用于获取当前城市空气质量，应用只在前台定位到城市级"
+    }
+  ]
+}
