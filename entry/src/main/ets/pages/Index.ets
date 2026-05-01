@@ -3,10 +3,12 @@ import { router } from '@kit.ArkUI';
 import { AqiSnapshot, PlantState, PollutantDisplayItem, StoredCityRecord, createInitialPlantState } from '../models/AqiModels';
 import { AqiClient } from '../services/AqiClient';
 import { LocationService } from '../services/LocationService';
+import { MockAqiService } from '../services/MockAqiService';
+import { MorphBranch, MorphBud, MorphLeaf, PlantMorphology, PlantMorphologyService } from '../services/PlantMorphologyService';
 import {
   buildPollutantItems,
   getPlantGrowthDays,
-  getPlantMaturity,
+  PLANT_MATURITY_DAYS,
   getQualityColor,
   normalizePlantState,
   updatePlantWithSnapshot
@@ -20,12 +22,15 @@ const CANVAS_HEIGHT: number = 760;
 const PLANT_ANIMATION_INTERVAL: number = 16;
 const PLANT_DETAIL_SHIFT: number = 390;
 const DETAIL_PANEL_HEIGHT: number = 356;
+const LEAF_BURST_DURATION: number = 72;
 
 @Entry
 @Component
 struct Index {
   private aqiClient: AqiClient = new AqiClient();
   private locationService: LocationService = new LocationService();
+  private mockAqiService: MockAqiService = new MockAqiService();
+  private plantMorphologyService: PlantMorphologyService = new PlantMorphologyService();
   private plantStore: PlantStore = new PlantStore();
   private canvasSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private canvasContext: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.canvasSettings);
@@ -42,6 +47,10 @@ struct Index {
   private storeReady: boolean = false;
   private preparing: boolean = false;
   private detailLayoutTarget: number = 0;
+  private installSeed: string = 'preview_seed';
+  private interactionActive: boolean = false;
+  private leafBurstActive: boolean = false;
+  private leafBurstFrame: number = 0;
 
   @State cityInput: string = '北京';
   @State loading: boolean = false;
@@ -88,8 +97,18 @@ struct Index {
     }
     this.animationTimer = setInterval(() => {
       this.animationFrame += 1;
-      if (this.touchPulse > 0) {
-        this.touchPulse = Math.max(0, this.touchPulse - 0.035);
+      if (this.interactionActive) {
+        if (this.touchPulse > 0) {
+          this.touchPulse = Math.max(0, this.touchPulse - (this.leafBurstActive ? 0.020 : 0.035));
+        }
+        if (this.leafBurstActive) {
+          this.leafBurstFrame += 1;
+        }
+        if (this.touchPulse <= 0 && (!this.leafBurstActive || this.leafBurstFrame >= LEAF_BURST_DURATION)) {
+          this.interactionActive = false;
+          this.leafBurstActive = false;
+          this.leafBurstFrame = 0;
+        }
       }
       if (this.plantSlideProgress < 1) {
         this.plantSlideProgress = Math.min(1, this.plantSlideProgress + 0.055);
@@ -198,6 +217,7 @@ struct Index {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       await this.plantStore.init(context);
+      this.installSeed = await this.plantStore.getInstallSeed();
       this.storeReady = true;
       const hasRecord = await this.reloadStoredRecords(true);
       if (hasRecord) {
@@ -240,6 +260,7 @@ struct Index {
 
   private async syncSelectedCityFromStore(): Promise<void> {
     try {
+      this.installSeed = await this.plantStore.getInstallSeed();
       await this.reloadStoredRecords(true);
     } catch (error) {
       this.statusText = this.getErrorMessage(error);
@@ -403,7 +424,7 @@ struct Index {
       this.lastFetchText = this.formatFetchTime();
       this.rebuildDisplayState();
       this.statusText = repeatedObservation ? '已是该城市的最新数据，植物状态未重复累计' :
-        `植物已吸收这次空气数据，成长 ${Math.min(getPlantGrowthDays(nextPlant), 7)}/7 天`;
+        `植物已吸收这次空气数据，成长 ${Math.min(getPlantGrowthDays(nextPlant), PLANT_MATURITY_DAYS)}/${PLANT_MATURITY_DAYS} 天`;
 
       await this.plantStore.saveCityRecord({
         cityKey: snapshot.cityKey,
@@ -412,6 +433,124 @@ struct Index {
         plant: nextPlant
       });
       await this.reloadStoredRecords(true);
+      this.requestRedraw();
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async applyMockDays(profile: string, days: number = PLANT_MATURITY_DAYS): Promise<void> {
+    if (this.loading || !this.isTestCity()) {
+      return;
+    }
+    const city = this.currentSnapshot === null ? '测试市' : this.currentSnapshot.cityName;
+    const effectiveDays = Math.max(1, Math.round(days));
+    this.loading = true;
+    this.statusText = `正在写入 ${city} 的 ${effectiveDays} 天模拟数据`;
+    try {
+      let snapshot = this.mockAqiService.createSnapshot(city, 0, profile);
+      let plant: PlantState | null = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      for (let i = 0; i < effectiveDays; i++) {
+        snapshot = this.mockAqiService.createSnapshot(city, i, profile);
+        plant = updatePlantWithSnapshot(plant, snapshot);
+      }
+      const finalPlant = plant;
+      if (finalPlant !== null) {
+        await this.plantStore.saveCityRecord({
+          cityKey: snapshot.cityKey,
+          cityName: snapshot.cityName,
+          snapshot,
+          plant: finalPlant
+        });
+      }
+      this.lastFetchText = this.formatFetchTime();
+      await this.reloadStoredRecords(true);
+      this.statusText = `已写入 ${snapshot.cityName} 的 ${effectiveDays} 天模拟数据`;
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private getCurrentMockProfile(): string {
+    if (this.currentSnapshot !== null && this.currentSnapshot.dominantPollutant === 'pm25') {
+      return 'pm25';
+    }
+    if (this.currentPlant.averageStress > 0.56) {
+      return 'polluted';
+    }
+    return 'clean';
+  }
+
+  private async appendMockDay(): Promise<void> {
+    if (this.loading || !this.isTestCity()) {
+      return;
+    }
+    const city = this.currentSnapshot === null ? '测试市' : this.currentSnapshot.cityName;
+    const dayOffset = getPlantGrowthDays(this.currentPlant);
+    const profile = this.getCurrentMockProfile();
+    this.loading = true;
+    this.statusText = `正在为 ${city} 增加 1 天模拟数据`;
+    try {
+      const snapshot = this.mockAqiService.createSnapshot(city, dayOffset, profile);
+      const storedPlant = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      const nextPlant = updatePlantWithSnapshot(storedPlant, snapshot);
+      await this.plantStore.saveCityRecord({
+        cityKey: snapshot.cityKey,
+        cityName: snapshot.cityName,
+        snapshot,
+        plant: nextPlant
+      });
+      this.lastFetchText = this.formatFetchTime();
+      await this.reloadStoredRecords(true);
+      this.statusText = `已增加到第 ${Math.min(getPlantGrowthDays(nextPlant), PLANT_MATURITY_DAYS)}/${PLANT_MATURITY_DAYS} 日`;
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async resetMockFirstDay(): Promise<void> {
+    if (this.loading || !this.isTestCity()) {
+      return;
+    }
+    const city = this.currentSnapshot === null ? '测试市' : this.currentSnapshot.cityName;
+    const profile = this.getCurrentMockProfile();
+    this.loading = true;
+    this.statusText = `正在把 ${city} 重置为第 1 天`;
+    try {
+      const snapshot = this.mockAqiService.createSnapshot(city, 0, profile);
+      const nextPlant = updatePlantWithSnapshot(null, snapshot);
+      await this.plantStore.saveCityRecord({
+        cityKey: snapshot.cityKey,
+        cityName: snapshot.cityName,
+        snapshot,
+        plant: nextPlant
+      });
+      this.lastFetchText = this.formatFetchTime();
+      await this.reloadStoredRecords(true);
+      this.statusText = `已重置为第 1/${PLANT_MATURITY_DAYS} 日`;
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async regenerateUserSeed(): Promise<void> {
+    if (this.loading || !this.isTestCity()) {
+      return;
+    }
+    this.loading = true;
+    this.statusText = '正在重新生成用户植物 seed';
+    try {
+      this.installSeed = await this.plantStore.regenerateInstallSeed();
+      await this.reloadStoredRecords(true);
+      this.statusText = '已重新生成用户 seed，测试市植物将以新的个体基因呈现';
       this.requestRedraw();
     } catch (error) {
       this.statusText = this.getErrorMessage(error);
@@ -434,8 +573,15 @@ struct Index {
   }
 
   private handlePlantTap(): void {
+    if (this.interactionActive) {
+      return;
+    }
+    const growthDays = getPlantGrowthDays(this.currentPlant);
+    this.interactionActive = true;
     this.touchPulse = 1;
-    this.statusText = '电子植物轻轻回应了一下';
+    this.leafBurstActive = growthDays >= PLANT_MATURITY_DAYS;
+    this.leafBurstFrame = 0;
+    this.statusText = this.leafBurstActive ? '成熟叶片被轻轻惊起' : '幼苗被风推了一下';
     this.drawPlant();
   }
 
@@ -484,7 +630,7 @@ struct Index {
     if (growthDays === 0) {
       return '待发芽';
     }
-    if (growthDays < 7) {
+    if (growthDays < PLANT_MATURITY_DAYS) {
       return '幼苗';
     }
     const stress = this.currentPlant.averageStress;
@@ -505,6 +651,35 @@ struct Index {
       return '#587064';
     }
     return getQualityColor(this.currentSnapshot.aqi);
+  }
+
+  private getPlantAccentColor(): string {
+    const palette = this.plantMorphologyService.buildPaletteForPlant(normalizePlantState(this.currentPlant), this.installSeed);
+    return palette.leaf;
+  }
+
+  private getCollectedDaysText(): string {
+    const days = Math.min(getPlantGrowthDays(this.currentPlant), PLANT_MATURITY_DAYS);
+    return `已收集 ${days}/${PLANT_MATURITY_DAYS} 日`;
+  }
+
+  private isTestCity(): boolean {
+    const cityName = this.getCityName();
+    if (cityName.indexOf('测试') >= 0) {
+      return true;
+    }
+    if (this.currentSnapshot !== null && this.currentSnapshot.cityKey.indexOf('test') >= 0) {
+      return true;
+    }
+    return false;
+  }
+
+  private getDetailPanelHeight(): number {
+    return DETAIL_PANEL_HEIGHT;
+  }
+
+  private getPlantInfoTopPadding(): number {
+    return this.isTestCity() ? 154 : 88;
   }
 
   private getStressColor(stress: number): string {
@@ -535,13 +710,13 @@ struct Index {
 
   private makeGrowthText(plant: PlantState): string {
     const growthDays = getPlantGrowthDays(plant);
-    if (growthDays >= 7) {
-      return '成熟 7/7 天';
+    if (growthDays >= PLANT_MATURITY_DAYS) {
+      return `成熟 ${PLANT_MATURITY_DAYS}/${PLANT_MATURITY_DAYS} 天`;
     }
     if (growthDays === 0) {
       return '等待第一天数据';
     }
-    return `幼苗 ${growthDays}/7 天`;
+    return `幼苗 ${growthDays}/${PLANT_MATURITY_DAYS} 天`;
   }
 
   private getGrowthText(): string {
@@ -558,20 +733,6 @@ struct Index {
     return this.detailLayoutProgress < 0.5 ? '纵向滑动查看 IAQI' : '纵向滑动收起 IAQI';
   }
 
-  private leafColor(score: number): string {
-    const r = Math.round(126 + (52 - 126) * score);
-    const g = Math.round(130 + (151 - 130) * score);
-    const b = Math.round(102 + (95 - 102) * score);
-    return `rgb(${r},${g},${b})`;
-  }
-
-  private leafShadowColor(score: number): string {
-    const r = Math.round(90 + (34 - 90) * score);
-    const g = Math.round(100 + (112 - 100) * score);
-    const b = Math.round(78 + (74 - 78) * score);
-    return `rgb(${r},${g},${b})`;
-  }
-
   private drawPlant(): void {
     if (!this.canvasReady) {
       return;
@@ -581,11 +742,12 @@ struct Index {
     const width = Math.max(280, this.canvasWidth);
     const height = Math.max(620, this.canvasHeight);
     const time = this.animationFrame * 0.18;
+    const palette = this.plantMorphologyService.buildPaletteForPlant(plant, this.installSeed);
 
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = '#EEF4E8';
+    ctx.fillStyle = palette.background;
     ctx.fillRect(0, 0, width, height);
-    this.drawAirParticles(ctx, width, height, plant.particleScore, time);
+    this.drawAirParticles(ctx, width, height, plant.particleScore, time, palette.particle);
 
     if (Math.abs(this.plantDragOffsetX) > 0.5) {
       const dragOffset = this.plantDragOffsetX;
@@ -640,186 +802,163 @@ struct Index {
     offsetX: number,
     pulse: number
   ): void {
-    const maturity = getPlantMaturity(plant);
-    const growth = 0.22 + maturity * 0.78;
-    const stress = plant.averageStress;
-    const vitality = 1 - stress;
-    const breathe = Math.sin(time) * (2 + growth * 3) * (0.35 + vitality * 0.65);
-    const rootX = width / 2 + offsetX;
-    const rootY = height - 40 - this.detailLayoutProgress * PLANT_DETAIL_SHIFT;
-    const stemHeight = (82 + maturity * 238) * (0.74 + plant.heightScore * 0.26);
-    const topY = rootY - stemHeight;
-    const bend = (plant.droopScore - 0.24) * (32 + maturity * 18) + breathe;
-    const topX = rootX + bend * (0.7 + growth * 0.3);
-    const ctrlX = rootX - bend * 0.36;
-    const ctrlY = rootY - stemHeight * 0.56;
-    const frondCount = maturity < 0.24 ? 2 : Math.max(3, Math.round(2 + maturity * 8 + plant.leafScore * 2));
-    const glowCount = maturity < 0.70 ? 0 : Math.round(plant.bloomScore * maturity * 6);
-    const stemColor = this.leafShadowColor(plant.colorScore);
-    const leafColor = this.leafColor(plant.colorScore);
-
-    this.drawSoilMound(ctx, rootX, rootY, growth, vitality);
-
-    ctx.strokeStyle = stemColor;
-    ctx.lineWidth = 4.8 + growth * 3.8;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(rootX, rootY);
-    ctx.quadraticCurveTo(ctrlX, ctrlY, topX, topY);
-    ctx.stroke();
-
-    for (let i = 0; i < frondCount; i++) {
-      const progress = maturity < 0.24 ? 0.38 + i * 0.22 : 0.18 + (i + 1) / (frondCount + 1) * 0.70;
-      const inverse = 1 - progress;
-      const side = i % 2 === 0 ? -1 : 1;
-      const anchorX = inverse * inverse * rootX + 2 * inverse * progress * ctrlX + progress * progress * topX;
-      const anchorY = inverse * inverse * rootY + 2 * inverse * progress * ctrlY + progress * progress * topY;
-      const sway = Math.sin(time + i * 0.72) * (2 + maturity * 5) * vitality;
-      const length = (42 + maturity * 104 + plant.leafScore * 24) * (0.70 + progress * 0.42);
-      const endX = anchorX + side * (length * (0.64 + maturity * 0.10) + sway);
-      const endY = anchorY - length * (0.20 + progress * 0.16) + plant.droopScore * 22;
-      const curve = side * (10 + maturity * 18 - plant.droopScore * 6);
-      const leafletCount = maturity < 0.24 ? 1 : Math.max(3, Math.round(2 + maturity * 8 + progress * 4));
-      this.drawFernFrondWorld(
-        ctx,
-        anchorX,
-        anchorY,
-        endX,
-        endY,
-        curve,
-        leafletCount,
-        leafColor,
-        stemColor,
-        maturity,
-        progress
-      );
-    }
-
-    this.drawFiddlehead(ctx, topX, topY, 14 + (1 - maturity) * 19, leafColor, stemColor);
-    this.drawPulseRing(ctx, topX, topY, growth, pulse);
-
-    for (let i = 0; i < glowCount; i++) {
-      const angle = Math.PI * 2 / glowCount * i;
-      const radius = 8 + maturity * 22 + pulse * 10;
-      const x = topX + Math.cos(angle) * radius;
-      const y = topY + Math.sin(angle) * radius * 0.72;
-      ctx.globalAlpha = 0.20 + maturity * 0.20;
-      ctx.fillStyle = '#E5B67F';
-      ctx.beginPath();
-      ctx.arc(x, y, 2 + plant.bloomScore * 2.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    this.drawSoilLip(ctx, rootX, rootY, growth);
+    const morphology = this.plantMorphologyService.buildMorphology(
+      plant,
+      this.installSeed,
+      width,
+      height,
+      time,
+      offsetX,
+      this.detailLayoutProgress * PLANT_DETAIL_SHIFT,
+      pulse
+    );
+    this.drawMorphology(ctx, morphology);
   }
 
-  private drawSoilMound(
-    ctx: CanvasRenderingContext2D,
-    rootX: number,
-    rootY: number,
-    growth: number,
-    vitality: number
-  ): void {
-    ctx.globalAlpha = 0.18 + vitality * 0.12;
-    ctx.fillStyle = '#8FC8A8';
+  private drawMorphology(ctx: CanvasRenderingContext2D, morphology: PlantMorphology): void {
+    this.drawMorphSoil(ctx, morphology);
+
+    for (let i = 0; i < morphology.branches.length; i++) {
+      this.drawMorphBranch(ctx, morphology.branches[i], morphology.palette.lesion);
+    }
+
+    for (let i = 0; i < morphology.leaves.length; i++) {
+      this.drawMorphLeaf(ctx, morphology.leaves[i], morphology.palette.lesion);
+    }
+
+    for (let i = 0; i < morphology.buds.length; i++) {
+      this.drawMorphBud(ctx, morphology.buds[i]);
+    }
+    if (this.leafBurstActive) {
+      this.drawLeafBurst(ctx, morphology);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  private drawMorphSoil(ctx: CanvasRenderingContext2D, morphology: PlantMorphology): void {
+    const rootX = morphology.rootX;
+    const rootY = morphology.rootY;
+    const growth = morphology.growth;
+    ctx.globalAlpha = 0.16 + (1 - morphology.stress) * 0.18;
+    ctx.fillStyle = morphology.palette.leafShadow;
     ctx.beginPath();
-    ctx.ellipse(rootX, rootY + 10, 52 + growth * 54, 18 + growth * 10, 0, 0, Math.PI * 2);
+    ctx.ellipse(rootX, rootY + 10, 54 + growth * 58, 18 + growth * 12, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = 1;
-  }
 
-  private drawSoilLip(ctx: CanvasRenderingContext2D, rootX: number, rootY: number, growth: number): void {
-    ctx.fillStyle = '#A26F52';
+    ctx.fillStyle = morphology.palette.soil;
     ctx.beginPath();
-    ctx.moveTo(rootX - 52 - growth * 20, rootY + 14);
-    ctx.lineTo(rootX + 52 + growth * 20, rootY + 14);
-    ctx.lineTo(rootX + 40 + growth * 14, rootY + 62);
-    ctx.lineTo(rootX - 40 - growth * 14, rootY + 62);
+    ctx.moveTo(rootX - 54 - growth * 22, rootY + 14);
+    ctx.lineTo(rootX + 54 + growth * 22, rootY + 14);
+    ctx.lineTo(rootX + 42 + growth * 16, rootY + 64);
+    ctx.lineTo(rootX - 42 - growth * 16, rootY + 64);
     ctx.closePath();
     ctx.fill();
 
-    ctx.fillStyle = '#7C5543';
+    ctx.fillStyle = morphology.palette.soilDark;
     ctx.beginPath();
-    ctx.ellipse(rootX, rootY + 14, 60 + growth * 22, 14, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#4D3E35';
-    ctx.beginPath();
-    ctx.ellipse(rootX, rootY + 9, 48 + growth * 18, 8, 0, 0, Math.PI * 2);
+    ctx.ellipse(rootX, rootY + 13, 62 + growth * 24, 15, 0, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  private quadraticPoint(start: number, control: number, end: number, progress: number): number {
-    const inverse = 1 - progress;
-    return inverse * inverse * start + 2 * inverse * progress * control + progress * progress * end;
-  }
-
-  private quadraticTangent(start: number, control: number, end: number, progress: number): number {
-    return 2 * (1 - progress) * (control - start) + 2 * progress * (end - control);
-  }
-
-  private drawFernFrondWorld(
-    ctx: CanvasRenderingContext2D,
-    startX: number,
-    startY: number,
-    endX: number,
-    endY: number,
-    curve: number,
-    leafletCount: number,
-    leafColor: string,
-    stemColor: string,
-    maturity: number,
-    frondProgress: number
-  ): void {
-    const midX = (startX + endX) * 0.5;
-    const midY = (startY + endY) * 0.5 - Math.abs(curve) * 0.20;
-    const dx = endX - startX;
-    const dy = endY - startY;
-    const distance = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-    const normalX = -dy / distance;
-    const normalY = dx / distance;
-    const controlX = midX + normalX * curve;
-    const controlY = midY + normalY * curve;
-
-    ctx.strokeStyle = stemColor;
-    ctx.lineWidth = 2 + maturity * 1.5;
+  private drawMorphBranch(ctx: CanvasRenderingContext2D, branch: MorphBranch, lesionColor: string): void {
+    ctx.globalAlpha = branch.alpha;
+    ctx.strokeStyle = branch.color;
+    ctx.lineWidth = branch.width;
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(startX, startY);
-    ctx.quadraticCurveTo(controlX, controlY, endX, endY);
+    ctx.moveTo(branch.startX, branch.startY);
+    ctx.quadraticCurveTo(branch.controlX, branch.controlY, branch.endX, branch.endY);
     ctx.stroke();
 
-    for (let i = 0; i < leafletCount; i++) {
-      const progress = (i + 1) / (leafletCount + 1);
-      const rootX = this.quadraticPoint(startX, controlX, endX, progress);
-      const rootY = this.quadraticPoint(startY, controlY, endY, progress);
-      const tangentX = this.quadraticTangent(startX, controlX, endX, progress);
-      const tangentY = this.quadraticTangent(startY, controlY, endY, progress);
-      const tangentLength = Math.max(1, Math.sqrt(tangentX * tangentX + tangentY * tangentY));
-      const unitNormalX = -tangentY / tangentLength;
-      const unitNormalY = tangentX / tangentLength;
-      const leafLength = (7 + maturity * 9 + (1 - progress) * 4) * (0.80 + frondProgress * 0.25);
-      const leafWidth = 3 + maturity * 3;
-      this.drawLeafletWorld(ctx, rootX, rootY, unitNormalX, unitNormalY, leafLength, leafWidth, leafColor);
-      this.drawLeafletWorld(ctx, rootX, rootY, -unitNormalX, -unitNormalY, leafLength * 0.88, leafWidth, leafColor);
+    if (branch.rupture > 0.22) {
+      const scarX = (branch.startX + branch.controlX + branch.endX) / 3;
+      const scarY = (branch.startY + branch.controlY + branch.endY) / 3;
+      ctx.globalAlpha = Math.min(0.55, branch.rupture);
+      ctx.strokeStyle = lesionColor;
+      ctx.lineWidth = Math.max(1.2, branch.width * 0.34);
+      ctx.beginPath();
+      ctx.moveTo(scarX - branch.width * 1.2, scarY - branch.width * 0.6);
+      ctx.lineTo(scarX + branch.width * 1.5, scarY + branch.width * 0.7);
+      ctx.stroke();
     }
-
-    ctx.fillStyle = leafColor;
-    ctx.beginPath();
-    ctx.arc(endX, endY, 2.6 + maturity * 1.4, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = 1;
   }
 
-  private drawLeafletWorld(
+  private drawMorphLeaf(ctx: CanvasRenderingContext2D, leaf: MorphLeaf, lesionColor: string): void {
+    const directionLength = Math.max(1, Math.sqrt(leaf.dirX * leaf.dirX + leaf.dirY * leaf.dirY));
+    const ux = leaf.dirX / directionLength;
+    const uy = leaf.dirY / directionLength;
+    const px = -uy;
+    const py = ux;
+    const skew = leaf.damage * 0.28;
+    const tipX = leaf.rootX + ux * leaf.length + px * leaf.length * skew;
+    const tipY = leaf.rootY + uy * leaf.length + py * leaf.length * skew;
+    const midX = leaf.rootX + ux * leaf.length * 0.52;
+    const midY = leaf.rootY + uy * leaf.length * 0.52;
+    const leftWidth = leaf.width * (1 + leaf.damage * 0.46);
+    const rightWidth = leaf.width * Math.max(0.38, 1 - leaf.damage * 0.52);
+
+    ctx.globalAlpha = leaf.alpha;
+    ctx.fillStyle = leaf.color;
+    ctx.beginPath();
+    ctx.moveTo(leaf.rootX, leaf.rootY);
+    ctx.quadraticCurveTo(midX + px * leftWidth, midY + py * leftWidth, tipX, tipY);
+    ctx.quadraticCurveTo(midX - px * rightWidth, midY - py * rightWidth, leaf.rootX, leaf.rootY);
+    ctx.fill();
+
+    if (leaf.damage > 0.32) {
+      ctx.globalAlpha = Math.min(0.44, leaf.damage);
+      ctx.fillStyle = lesionColor;
+      ctx.beginPath();
+      ctx.ellipse(midX + px * leaf.width * 0.38, midY + py * leaf.width * 0.38,
+        Math.max(1, leaf.width * 0.34), Math.max(1, leaf.width * 0.18), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  private drawMorphBud(ctx: CanvasRenderingContext2D, bud: MorphBud): void {
+    ctx.globalAlpha = bud.alpha;
+    ctx.fillStyle = bud.color;
+    ctx.beginPath();
+    ctx.arc(bud.x, bud.y, bud.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  private drawLeafBurst(ctx: CanvasRenderingContext2D, morphology: PlantMorphology): void {
+    const progress = Math.min(1, this.leafBurstFrame / LEAF_BURST_DURATION);
+    const alpha = Math.max(0, 1 - progress);
+    const count = 14 + Math.round(morphology.growth * 10);
+    for (let i = 0; i < count; i++) {
+      const n1 = this.burstNoise(i, 1);
+      const n2 = this.burstNoise(i, 2);
+      const n3 = this.burstNoise(i, 3);
+      const startX = morphology.rootX + (n1 - 0.5) * (90 + morphology.growth * 120);
+      const startY = morphology.rootY - 170 - n2 * (120 + morphology.growth * 140);
+      const driftX = (n2 - 0.5) * (140 + morphology.growth * 90) * progress;
+      const fallY = (80 + n3 * 180) * progress;
+      const flutter = Math.sin(progress * 10 + i * 0.74) * (14 + n1 * 18);
+      const x = startX + driftX + flutter;
+      const y = startY + fallY;
+      const dirX = Math.cos(progress * Math.PI * 2 + i);
+      const dirY = Math.sin(progress * Math.PI * 2 + i) * 0.35 + 0.30;
+      this.drawFloatingLeaf(ctx, x, y, dirX, dirY, 11 + n2 * 11, 3 + n3 * 3,
+        i % 3 === 0 ? morphology.palette.leafAccent : morphology.palette.leaf, alpha * (0.28 + n1 * 0.46));
+    }
+  }
+
+  private drawFloatingLeaf(
     ctx: CanvasRenderingContext2D,
     rootX: number,
     rootY: number,
     dirX: number,
     dirY: number,
     length: number,
-    leafWidth: number,
-    color: string
+    width: number,
+    color: string,
+    alpha: number
   ): void {
     const directionLength = Math.max(1, Math.sqrt(dirX * dirX + dirY * dirY));
     const ux = dirX / directionLength;
@@ -828,67 +967,35 @@ struct Index {
     const py = ux;
     const tipX = rootX + ux * length;
     const tipY = rootY + uy * length;
-    const midX = rootX + ux * length * 0.52;
-    const midY = rootY + uy * length * 0.52;
+    const midX = rootX + ux * length * 0.50;
+    const midY = rootY + uy * length * 0.50;
 
+    ctx.globalAlpha = alpha;
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.moveTo(rootX, rootY);
-    ctx.quadraticCurveTo(midX + px * leafWidth, midY + py * leafWidth, tipX, tipY);
-    ctx.quadraticCurveTo(midX - px * leafWidth, midY - py * leafWidth, rootX, rootY);
+    ctx.quadraticCurveTo(midX + px * width, midY + py * width, tipX, tipY);
+    ctx.quadraticCurveTo(midX - px * width * 0.7, midY - py * width * 0.7, rootX, rootY);
     ctx.fill();
+    ctx.globalAlpha = 1;
   }
 
-  private drawFiddlehead(
+  private burstNoise(index: number, salt: number): number {
+    const raw = Math.sin((index + 1) * 12.9898 + salt * 78.233 + this.currentCityIndex * 37.719 +
+      this.installSeed.length * 0.173) * 43758.5453;
+    return raw - Math.floor(raw);
+  }
+
+  private drawAirParticles(
     ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    radius: number,
-    leafColor: string,
-    stemColor: string
+    width: number,
+    height: number,
+    stress: number,
+    time: number,
+    color: string
   ): void {
-    ctx.strokeStyle = stemColor;
-    ctx.lineWidth = 3.4;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    for (let i = 0; i <= 30; i++) {
-      const progress = i / 30;
-      const theta = progress * Math.PI * 3.2;
-      const r = radius * (1 - progress * 0.78);
-      const px = x + Math.cos(theta) * r;
-      const py = y + Math.sin(theta) * r;
-      if (i === 0) {
-        ctx.moveTo(px, py);
-      } else {
-        ctx.lineTo(px, py);
-      }
-    }
-    ctx.stroke();
-
-    ctx.globalAlpha = 0.28;
-    ctx.fillStyle = leafColor;
-    ctx.beginPath();
-    ctx.arc(x, y, radius * 0.42, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-  }
-
-  private drawPulseRing(ctx: CanvasRenderingContext2D, x: number, y: number, growth: number, pulse: number): void {
-    if (pulse <= 0) {
-      return;
-    }
-    ctx.globalAlpha = pulse * 0.34;
-    ctx.strokeStyle = '#E5B67F';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(x, y, 18 + growth * 18 + (1 - pulse) * 34, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-  }
-
-  private drawAirParticles(ctx: CanvasRenderingContext2D, width: number, height: number, stress: number, time: number): void {
     const count = Math.round(8 + stress * 30);
-    ctx.fillStyle = '#6C716C';
+    ctx.fillStyle = color;
     for (let i = 0; i < count; i++) {
       const drift = Math.sin(time * 0.52 + i * 1.7) * 5;
       const x = 20 + (i * 57 + Math.round(time * 8)) % (width - 40) + drift;
@@ -904,28 +1011,163 @@ struct Index {
 
   @Builder
   TopInfoBar() {
-    Row({ space: 8 }) {
-      Text('⌖')
-        .fontSize(18)
-        .fontColor('#2E6D5E')
-      Text(this.getCityName())
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#1F2925')
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .layoutWeight(1)
+    Row({ space: 10 }) {
+      Column({ space: 1 }) {
+        Text('空气花园')
+          .fontSize(22)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.getPlantAccentColor())
+        Text(this.loading ? '更新中' : this.getPlantMoodText())
+          .fontSize(11)
+          .fontColor('#647069')
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+
+      Row({ space: 6 }) {
+        Text('⌖')
+          .fontSize(16)
+          .fontColor(this.getPlantAccentColor())
+        Text(this.getCityName())
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#1F2925')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('56%')
+      .padding({ left: 10, right: 10, top: 7, bottom: 7 })
+      .backgroundColor('#E7EFE4')
+      .borderRadius(10)
+      .onClick(() => {
+        this.openCitySwitch();
+      })
     }
     .width('100%')
-    .height(48)
+    .height(56)
     .padding({ left: 14, right: 14 })
     .alignItems(VerticalAlign.Center)
     .backgroundColor('#F7FAF3')
     .borderRadius(14)
     .shadow({ radius: 12, color: '#1A000000', offsetX: 0, offsetY: 4 })
-    .onClick(() => {
-      this.openCitySwitch();
-    })
+  }
+
+  @Builder
+  PlantInfoOverlay() {
+    Column({ space: 2 }) {
+      Text(this.getAqiText())
+        .fontSize(70)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.getQualityColorValue())
+        .lineHeight(74)
+      Row({ space: 8 }) {
+        Text(this.getQualityText())
+          .fontSize(13)
+          .fontColor(Color.White)
+          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+          .backgroundColor(this.getQualityColorValue())
+          .borderRadius(8)
+        Text(this.getCollectedDaysText())
+          .fontSize(13)
+          .fontColor('#33413A')
+          .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+          .backgroundColor('#E7EFE4')
+          .borderRadius(8)
+      }
+      Text(this.getObservedText())
+        .fontSize(11)
+        .fontColor('#647069')
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
+  }
+
+  @Builder
+  MainTestPanel() {
+    Column({ space: 6 }) {
+      Row({ space: 8 }) {
+        Text('测试')
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#26312B')
+        Text(this.getCollectedDaysText())
+          .fontSize(11)
+          .fontColor('#5E6A63')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Blank()
+        Button('+1 天')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#667B68')
+          .borderRadius(7)
+          .onClick(() => {
+            this.appendMockDay();
+          })
+        Button('首日')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#8A765C')
+          .borderRadius(7)
+          .onClick(() => {
+            this.resetMockFirstDay();
+          })
+      }
+      .width('100%')
+
+      Row({ space: 6 }) {
+        Button('清洁 14')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#2F9E6D')
+          .borderRadius(7)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.applyMockDays('clean', PLANT_MATURITY_DAYS);
+          })
+        Button('污染 14')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#B94F5F')
+          .borderRadius(7)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.applyMockDays('polluted', PLANT_MATURITY_DAYS);
+          })
+        Button('PM2.5')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#7D6A50')
+          .borderRadius(7)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.applyMockDays('pm25', PLANT_MATURITY_DAYS);
+          })
+        Button('seed')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#4E5F86')
+          .borderRadius(7)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.regenerateUserSeed();
+          })
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+    .backgroundColor('#FFF8EA')
+    .borderRadius(12)
+    .shadow({ radius: 8, color: '#14000000', offsetX: 0, offsetY: 3 })
   }
 
   @Builder
@@ -1004,7 +1246,7 @@ struct Index {
 
   @Builder
   DataSheet() {
-    Column({ space: 18 }) {
+    Column({ space: 14 }) {
       this.PollutantPanel()
       this.SourcePanel()
     }
@@ -1012,7 +1254,7 @@ struct Index {
     .padding({ left: 18, right: 18, top: 22, bottom: 34 })
     .backgroundColor('#E8F0E2')
     .borderRadius(24)
-    .height(DETAIL_PANEL_HEIGHT)
+    .height(this.getDetailPanelHeight())
   }
 
   @Builder
@@ -1265,11 +1507,17 @@ struct Index {
       this.PlantStage()
 
       Column() {
+        this.PlantInfoOverlay()
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, top: this.getPlantInfoTopPadding() })
+
+      Column() {
         this.DataSheet()
       }
       .width('100%')
       .position({ x: 0, y: '100%' })
-      .translate({ y: -this.detailLayoutProgress * DETAIL_PANEL_HEIGHT })
+      .translate({ y: -this.detailLayoutProgress * this.getDetailPanelHeight() })
       .opacity(this.detailLayoutProgress)
       .gesture(
         PanGesture({ direction: PanDirection.Vertical, distance: 10 })
@@ -1283,6 +1531,14 @@ struct Index {
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 18 })
+
+      if (this.isTestCity()) {
+        Column() {
+          this.MainTestPanel()
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 80 })
+      }
     }
     .width('100%')
     .height('100%')

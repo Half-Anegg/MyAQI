@@ -20,6 +20,22 @@ export interface PlantMemory {
   co: number;
 }
 
+export interface PlantGenome {
+  seed: string;
+  branchAngle: number;
+  branchSpread: number;
+  segmentScale: number;
+  curl: number;
+  asymmetry: number;
+  leafRhythm: number;
+  alienSensitivity: number;
+  primaryHue: number;
+  secondaryHue: number;
+  stemHueOffset: number;
+  bloomHue: number;
+  colorShiftSensitivity: number;
+}
+
 export interface AqiSnapshot {
   cityKey: string;
   cityName: string;
@@ -37,6 +53,7 @@ export interface AqiSnapshot {
 export interface PlantState {
   cityKey: string;
   cityName: string;
+  genomeSeed: string;
   lastObservedAt: string;
   sampleCount: number;
   observationDates: string[];
@@ -92,6 +109,7 @@ export function createInitialPlantState(cityKey: string, cityName: string): Plan
   return {
     cityKey,
     cityName,
+    genomeSeed: '',
     lastObservedAt: '',
     sampleCount: 0,
     observationDates: [],

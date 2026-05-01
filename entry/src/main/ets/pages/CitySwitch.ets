@@ -1,10 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
-import { AqiSnapshot, PlantState, StoredCityRecord } from '../models/AqiModels';
+import { AqiSnapshot, StoredCityRecord } from '../models/AqiModels';
 import { AqiClient } from '../services/AqiClient';
 import { LocationService } from '../services/LocationService';
-import { MockAqiService } from '../services/MockAqiService';
-import { getPlantGrowthDays, normalizePlantState, updatePlantWithSnapshot } from '../services/PlantAlgorithm';
+import { getPlantGrowthDays, normalizePlantState, PLANT_MATURITY_DAYS, updatePlantWithSnapshot } from '../services/PlantAlgorithm';
 import { PlantStore } from '../storage/PlantStore';
 
 @Entry
@@ -12,7 +11,6 @@ import { PlantStore } from '../storage/PlantStore';
 struct CitySwitch {
   private aqiClient: AqiClient = new AqiClient();
   private locationService: LocationService = new LocationService();
-  private mockAqiService: MockAqiService = new MockAqiService();
   private plantStore: PlantStore = new PlantStore();
 
   @State cityInput: string = '';
@@ -111,40 +109,6 @@ struct CitySwitch {
     }
   }
 
-  private async applyMockDays(profile: string): Promise<void> {
-    if (this.loading) {
-      return;
-    }
-    const city = this.cityInput.trim().length === 0 ? '测试市' : this.cityInput.trim();
-    this.loading = true;
-    this.statusText = `正在写入 ${city} 的 7 天模拟数据`;
-    try {
-      let snapshot = this.mockAqiService.createSnapshot(city, 0, profile);
-      let plant: PlantState | null = await this.plantStore.getStoredPlant(snapshot.cityKey);
-      for (let i = 0; i < 7; i++) {
-        snapshot = this.mockAqiService.createSnapshot(city, i, profile);
-        plant = updatePlantWithSnapshot(plant, snapshot);
-      }
-      const finalPlant = plant;
-      if (finalPlant !== null) {
-        await this.plantStore.saveCityRecord({
-          cityKey: snapshot.cityKey,
-          cityName: snapshot.cityName,
-          snapshot,
-          plant: finalPlant
-        });
-      }
-      this.lastCityKey = snapshot.cityKey;
-      await this.reloadRecords();
-      this.statusText = `已写入 ${snapshot.cityName} 的 7 天模拟数据`;
-      this.goBack();
-    } catch (error) {
-      this.statusText = this.getErrorMessage(error);
-    } finally {
-      this.loading = false;
-    }
-  }
-
   private goBack(): void {
     try {
       router.back();
@@ -168,9 +132,9 @@ struct CitySwitch {
 
   private getRecordSubText(record: StoredCityRecord): string {
     const plant = normalizePlantState(record.plant);
-    const growthDays = Math.min(getPlantGrowthDays(plant), 7);
+    const growthDays = Math.min(getPlantGrowthDays(plant), PLANT_MATURITY_DAYS);
     const quality = record.snapshot === null ? '暂无 AQI' : record.snapshot.qualityLabel;
-    return `${quality} · 成长 ${growthDays}/7 天`;
+    return `${quality} · 成长 ${growthDays}/${PLANT_MATURITY_DAYS} 天`;
   }
 
   @Builder
@@ -216,64 +180,6 @@ struct CitySwitch {
       }, (record: StoredCityRecord) => record.cityKey)
     }
     .width('100%')
-  }
-
-  @Builder
-  MockToolPanel() {
-    Column({ space: 12 }) {
-      Text('开发测试')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#26312B')
-        .width('100%')
-      Text('使用确定性的模拟快照连续写入 7 个不同日期，可快速验证植物成熟、污染记忆、持久化和城市切换。建议用“测试市”或在输入框里填写专门的测试城市。')
-        .fontSize(12)
-        .fontColor('#647069')
-        .lineHeight(18)
-        .width('100%')
-      Row({ space: 8 }) {
-        Button('清洁 7 天')
-          .height(38)
-          .fontSize(13)
-          .enabled(!this.loading)
-          .backgroundColor('#2F9E6D')
-          .borderRadius(9)
-          .layoutWeight(1)
-          .onClick(() => {
-            this.applyMockDays('clean');
-          })
-        Button('污染 7 天')
-          .height(38)
-          .fontSize(13)
-          .enabled(!this.loading)
-          .backgroundColor('#B94F5F')
-          .borderRadius(9)
-          .layoutWeight(1)
-          .onClick(() => {
-            this.applyMockDays('polluted');
-          })
-        Button('PM2.5 压力')
-          .height(38)
-          .fontSize(13)
-          .enabled(!this.loading)
-          .backgroundColor('#7D6A50')
-          .borderRadius(9)
-          .layoutWeight(1)
-          .onClick(() => {
-            this.applyMockDays('pm25');
-          })
-      }
-      .width('100%')
-      Text('性状映射：PM2.5 影响高度和低垂；PM10 影响叶片密度；O3 影响叶色；六项污染物的综合压力共同影响挺拔程度、花苞和空气颗粒。')
-        .fontSize(12)
-        .fontColor('#4F5B54')
-        .lineHeight(18)
-        .width('100%')
-    }
-    .width('100%')
-    .padding(16)
-    .backgroundColor('#FFF8EA')
-    .borderRadius(16)
   }
 
   build() {
@@ -352,8 +258,6 @@ struct CitySwitch {
         .padding(16)
         .backgroundColor('#E8F0E2')
         .borderRadius(16)
-
-        this.MockToolPanel()
 
         Column({ space: 12 }) {
           Text('已查看城市')

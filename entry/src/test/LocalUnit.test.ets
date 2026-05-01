@@ -9,6 +9,7 @@ import {
   normalizePollutantIndex,
   updatePlantWithSnapshot
 } from '../main/ets/services/PlantAlgorithm';
+import { PlantMorphologyService } from '../main/ets/services/PlantMorphologyService';
 
 export default function localUnitTest() {
   describe('AQI electronic plant', () => {
@@ -187,6 +188,7 @@ export default function localUnitTest() {
       expect(getPlantGrowthDays(legacyPlant)).assertEqual(1);
       expect(normalized.observationDates.length).assertEqual(1);
       expect(normalized.observationDates[0]).assertEqual('2026-05-01');
+      expect(normalized.genomeSeed).assertEqual('');
     });
 
     it('updates different cities as separate plant states', 0, () => {
@@ -243,6 +245,68 @@ export default function localUnitTest() {
       const items = buildPollutantItems(null, plant.pollutantMemory);
       expect(items.length).assertEqual(6);
       expect(items[0].missing).assertTrue();
+    });
+
+    it('generates stable plant genome from user seed and city key', 0, () => {
+      const service = new PlantMorphologyService();
+      const first = service.buildGenome('seed_a', 'beijing');
+      const second = service.buildGenome('seed_a', 'beijing');
+      const changed = service.buildGenome('seed_b', 'beijing');
+      expect(first.primaryHue).assertEqual(second.primaryHue);
+      expect(first.branchAngle).assertEqual(second.branchAngle);
+      expect(first.primaryHue !== changed.primaryHue || first.branchAngle !== changed.branchAngle).assertTrue();
+      const visibleDelta = Math.abs(first.primaryHue - changed.primaryHue) +
+        Math.abs(first.branchAngle - changed.branchAngle) * 80 +
+        Math.abs(first.leafRhythm - changed.leafRhythm) * 40 +
+        Math.abs(first.curl - changed.curl) * 30;
+      expect(visibleDelta > 12).assertTrue();
+    });
+
+    it('makes polluted plants more distorted and color shifted', 0, () => {
+      const service = new PlantMorphologyService();
+      const clean = createInitialPlantState('test', '测试市');
+      clean.averageStress = 0.16;
+      clean.pollutantMemory.pm25 = 0.10;
+      clean.pollutantMemory.pm10 = 0.12;
+      clean.pollutantMemory.o3 = 0.12;
+      clean.pollutantMemory.no2 = 0.10;
+      clean.pollutantMemory.so2 = 0.08;
+      clean.pollutantMemory.co = 0.08;
+
+      const polluted = createInitialPlantState('test', '测试市');
+      polluted.averageStress = 0.82;
+      polluted.pollutantMemory.pm25 = 0.86;
+      polluted.pollutantMemory.pm10 = 0.78;
+      polluted.pollutantMemory.o3 = 0.74;
+      polluted.pollutantMemory.no2 = 0.70;
+      polluted.pollutantMemory.so2 = 0.62;
+      polluted.pollutantMemory.co = 0.58;
+
+      const genome = service.buildGenome('seed_a', 'test');
+      expect(service.getDistortionScore(polluted, genome) > service.getDistortionScore(clean, genome)).assertTrue();
+      expect(service.getColorPollutionShift(polluted, genome) > service.getColorPollutionShift(clean, genome)).assertTrue();
+    });
+
+    it('increases L-System complexity as plant matures', 0, () => {
+      const service = new PlantMorphologyService();
+      const seedling = createInitialPlantState('growth', '成长市');
+      seedling.observationDates = ['2026-05-01'];
+
+      const mature = createInitialPlantState('growth', '成长市');
+      mature.observationDates = [
+        '2026-05-01',
+        '2026-05-02',
+        '2026-05-03',
+        '2026-05-04',
+        '2026-05-05',
+        '2026-05-06',
+        '2026-05-07'
+      ];
+
+      const seedlingMorphology = service.buildMorphology(seedling, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const matureMorphology = service.buildMorphology(mature, 'seed_a', 360, 720, 0, 0, 0, 0);
+      expect(matureMorphology.branches.length > seedlingMorphology.branches.length).assertTrue();
+      expect(matureMorphology.leaves.length > seedlingMorphology.leaves.length).assertTrue();
     });
   });
 }

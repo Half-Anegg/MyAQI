@@ -14,6 +14,7 @@ import {
 } from '../models/AqiModels';
 
 const ALPHA: number = 0.18;
+export const PLANT_MATURITY_DAYS: number = 14;
 
 function clamp(value: number, min: number = 0, max: number = 1): number {
   if (value < min) {
@@ -165,6 +166,7 @@ export function normalizePlantState(plant: PlantState): PlantState {
   return {
     cityKey,
     cityName,
+    genomeSeed: plant.genomeSeed === undefined || plant.genomeSeed === null ? fallback.genomeSeed : plant.genomeSeed,
     lastObservedAt: plant.lastObservedAt === undefined || plant.lastObservedAt === null ? '' : plant.lastObservedAt,
     sampleCount: Math.max(0, Math.round(safeNumber(plant.sampleCount, fallback.sampleCount))),
     observationDates: dates,
@@ -185,7 +187,7 @@ export function getPlantGrowthDays(plant: PlantState): number {
 }
 
 export function getPlantMaturity(plant: PlantState): number {
-  return clamp(getPlantGrowthDays(plant) / 7);
+  return clamp(getPlantGrowthDays(plant) / PLANT_MATURITY_DAYS);
 }
 
 function appendObservationDate(plant: PlantState, observedAt: string): string[] {
@@ -203,6 +205,7 @@ export function updatePlantWithSnapshot(current: PlantState | null, snapshot: Aq
     return {
       cityKey: base.cityKey,
       cityName: base.cityName,
+      genomeSeed: base.genomeSeed,
       lastObservedAt: base.lastObservedAt,
       sampleCount: base.sampleCount,
       observationDates: getPlantObservationDates(base),
@@ -237,6 +240,7 @@ export function updatePlantWithSnapshot(current: PlantState | null, snapshot: Aq
   return {
     cityKey: snapshot.cityKey,
     cityName: snapshot.cityName,
+    genomeSeed: base.genomeSeed,
     lastObservedAt: snapshot.observedAt,
     sampleCount: base.sampleCount + 1,
     observationDates,

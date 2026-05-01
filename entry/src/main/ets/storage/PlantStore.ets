@@ -7,6 +7,7 @@ const STORE_NAME: string = 'aqi_plant_store';
 const RECORDS_KEY: string = 'city_records';
 const RECORD_ORDER_KEY: string = 'city_record_order';
 const LAST_CITY_KEY: string = 'last_city_key';
+const INSTALL_SEED_KEY: string = 'install_seed';
 
 export class PlantStore {
   private store: preferences.Preferences | null = null;
@@ -42,6 +43,31 @@ export class PlantStore {
     }
   }
 
+  async getInstallSeed(): Promise<string> {
+    const pref = this.requireStore();
+    try {
+      const value = String(await pref.get(INSTALL_SEED_KEY, ''));
+      if (value.length > 0) {
+        return value;
+      }
+      return await this.regenerateInstallSeed();
+    } catch (error) {
+      return await this.regenerateInstallSeed();
+    }
+  }
+
+  async regenerateInstallSeed(): Promise<string> {
+    const pref = this.requireStore();
+    const seed = this.createInstallSeed();
+    try {
+      await pref.put(INSTALL_SEED_KEY, seed);
+      await pref.flush();
+      return seed;
+    } catch (error) {
+      throw new Error('重新生成植物种子失败');
+    }
+  }
+
   async getCityRecord(cityKey: string): Promise<StoredCityRecord | null> {
     const records = await this.readRecords();
     const record = records[cityKey];
@@ -69,7 +95,15 @@ export class PlantStore {
     const pref = this.requireStore();
     const records = await this.readRecords();
     const order = await this.readRecordOrder();
-    records[record.cityKey] = record;
+    const installSeed = await this.getInstallSeed();
+    const normalizedPlant = normalizePlantState(record.plant);
+    normalizedPlant.genomeSeed = installSeed;
+    records[record.cityKey] = {
+      cityKey: record.cityKey,
+      cityName: record.cityName,
+      snapshot: record.snapshot,
+      plant: normalizedPlant
+    };
     if (!order.includes(record.cityKey)) {
       order.push(record.cityKey);
     }
@@ -156,6 +190,12 @@ export class PlantStore {
       snapshot: record.snapshot,
       plant
     };
+  }
+
+  private createInstallSeed(): string {
+    const timestamp = new Date().getTime();
+    const randomPart = Math.floor(Math.random() * 1000000000);
+    return `seed_${timestamp}_${randomPart}`;
   }
 
   private requireStore(): preferences.Preferences {
