@@ -5,6 +5,7 @@ import { normalizePlantState } from '../services/PlantAlgorithm';
 
 const STORE_NAME: string = 'aqi_plant_store';
 const RECORDS_KEY: string = 'city_records';
+const RECORD_ORDER_KEY: string = 'city_record_order';
 const LAST_CITY_KEY: string = 'last_city_key';
 
 export class PlantStore {
@@ -50,12 +51,31 @@ export class PlantStore {
     return this.normalizeRecord(record);
   }
 
+  async getAllCityRecords(): Promise<StoredCityRecord[]> {
+    const records = await this.readRecords();
+    const orderedKeys = await this.readRecordOrder();
+    const keys = this.mergeRecordKeys(Object.keys(records), orderedKeys);
+    const result: StoredCityRecord[] = [];
+    for (let i = 0; i < keys.length; i++) {
+      const record = records[keys[i]];
+      if (record !== undefined && record !== null) {
+        result.push(this.normalizeRecord(record));
+      }
+    }
+    return result;
+  }
+
   async saveCityRecord(record: StoredCityRecord): Promise<void> {
     const pref = this.requireStore();
     const records = await this.readRecords();
+    const order = await this.readRecordOrder();
     records[record.cityKey] = record;
+    if (!order.includes(record.cityKey)) {
+      order.push(record.cityKey);
+    }
     try {
       await pref.put(RECORDS_KEY, JSON.stringify(records));
+      await pref.put(RECORD_ORDER_KEY, JSON.stringify(order));
       await pref.flush();
       await this.saveLastCityKey(record.cityKey);
     } catch (error) {
@@ -81,6 +101,48 @@ export class PlantStore {
     } catch (error) {
       return {};
     }
+  }
+
+  private async readRecordOrder(): Promise<string[]> {
+    const pref = this.requireStore();
+    let value = '[]';
+    try {
+      value = String(await pref.get(RECORD_ORDER_KEY, '[]'));
+    } catch (error) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(value) as string[];
+      if (parsed === undefined || parsed === null || !Array.isArray(parsed)) {
+        return [];
+      }
+      const order: string[] = [];
+      for (let i = 0; i < parsed.length; i++) {
+        const key = String(parsed[i]);
+        if (key.length > 0) {
+          order.push(key);
+        }
+      }
+      return order;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  private mergeRecordKeys(allKeys: string[], orderedKeys: string[]): string[] {
+    const result: string[] = [];
+    for (let i = 0; i < orderedKeys.length; i++) {
+      if (allKeys.includes(orderedKeys[i]) && !result.includes(orderedKeys[i])) {
+        result.push(orderedKeys[i]);
+      }
+    }
+    const sortedKeys = allKeys.sort();
+    for (let i = 0; i < sortedKeys.length; i++) {
+      if (!result.includes(sortedKeys[i])) {
+        result.push(sortedKeys[i]);
+      }
+    }
+    return result;
   }
 
   private normalizeRecord(record: StoredCityRecord): StoredCityRecord {

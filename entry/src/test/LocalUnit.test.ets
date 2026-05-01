@@ -67,6 +67,14 @@ export default function localUnitTest() {
       expect(snapshot.missingPollutants.length).assertEqual(5);
     });
 
+    it('normalizes locations to city level', 0, () => {
+      const client = new AqiClient();
+      expect(client.normalizeCityName('北京市朝阳区')).assertEqual('北京市');
+      expect(client.normalizeCityName('北京')).assertEqual('北京市');
+      expect(client.normalizeCityName('成都, 四川')).assertEqual('成都市');
+      expect(client.normalizeCityName('Xizhimen, Beijing, China')).assertEqual('Beijing');
+    });
+
     it('rejects non-ok WAQI response', 0, () => {
       const client = new AqiClient();
       let failed = false;

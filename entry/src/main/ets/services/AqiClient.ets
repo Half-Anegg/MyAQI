@@ -46,17 +46,27 @@ export class AqiClient {
   }
 
   async fetchByCity(city: string): Promise<AqiSnapshot> {
-    const normalizedCity = city.trim();
+    const normalizedCity = this.normalizeCityName(city.trim());
     if (normalizedCity.length === 0) {
       throw new Error('请输入城市名称');
     }
-    const url = `https://api.waqi.info/feed/${encodeURIComponent(normalizedCity)}/?token=${AQI_WAQI_TOKEN}`;
+    const url =
+      `https://api.waqi.info/feed/${encodeURIComponent(normalizedCity)}/?token=${AQI_WAQI_TOKEN}&_=${Date.now()}`;
     return this.requestSnapshot(url, normalizedCity);
   }
 
   async fetchByGeo(latitude: number, longitude: number): Promise<AqiSnapshot> {
-    const url = `https://api.waqi.info/feed/geo:${latitude};${longitude}/?token=${AQI_WAQI_TOKEN}`;
-    return this.requestSnapshot(url, '当前位置');
+    const url = `https://api.waqi.info/feed/geo:${latitude};${longitude}/?token=${AQI_WAQI_TOKEN}&_=${Date.now()}`;
+    const geoSnapshot = await this.requestSnapshot(url, '当前位置');
+    const cityName = this.normalizeCityName(geoSnapshot.cityName);
+    if (cityName.length === 0 || cityName === '当前位置') {
+      return geoSnapshot;
+    }
+    try {
+      return await this.fetchByCity(cityName);
+    } catch (error) {
+      return this.withCityLevelName(geoSnapshot, cityName);
+    }
   }
 
   private async requestSnapshot(url: string, fallbackCityName: string): Promise<AqiSnapshot> {
@@ -106,7 +116,8 @@ export class AqiClient {
     pollutants.so2 = this.readIaqiValue(data.iaqi?.so2);
     pollutants.co = this.readIaqiValue(data.iaqi?.co);
 
-    const cityName = this.cleanCityName(data.city?.name, fallbackCityName);
+    const stationName = this.cleanDisplayName(data.city?.name, fallbackCityName);
+    const cityName = this.normalizeCityName(stationName);
     const stationUrl = data.city?.url ?? 'https://aqicn.org/';
     const aqi = this.toNumberOrNull(data.aqi);
     const missingPollutants = this.collectMissingPollutants(pollutants);
@@ -114,7 +125,7 @@ export class AqiClient {
     return {
       cityKey: this.makeCityKey(cityName),
       cityName,
-      stationName: cityName,
+      stationName,
       aqi,
       qualityLabel: getQualityLabel(aqi),
       dominantPollutant: data.dominentpol ?? '暂无',
@@ -167,12 +178,80 @@ export class AqiClient {
     return missing;
   }
 
-  private cleanCityName(name: string | undefined, fallback: string): string {
+  normalizeCityName(name: string): string {
+    const raw = this.cleanDisplayName(name, name);
+    const segments = raw.split(/[,，、()（）/]/).map((item: string) => item.trim())
+      .filter((item: string) => item.length > 0 && item !== 'China' && item !== '中国');
+    for (let i = 0; i < segments.length; i++) {
+      const city = this.extractChineseCityName(segments[i]);
+      if (city.length > 0) {
+        return city;
+      }
+    }
+    const directCity = this.extractChineseCityName(raw);
+    if (directCity.length > 0) {
+      return directCity;
+    }
+    if (segments.length > 1) {
+      return segments[segments.length - 1];
+    }
+    return raw.trim();
+  }
+
+  private extractChineseCityName(text: string): string {
+    const cityMatch = text.match(/[\u4e00-\u9fa5]{2,12}市/);
+    if (cityMatch !== null && cityMatch.length > 0) {
+      return cityMatch[0];
+    }
+
+    const municipalities: string[] = ['北京', '上海', '天津', '重庆'];
+    for (let i = 0; i < municipalities.length; i++) {
+      if (text.indexOf(municipalities[i]) >= 0) {
+        return `${municipalities[i]}市`;
+      }
+    }
+
+    const chineseMatches = text.match(/[\u4e00-\u9fa5]+/g);
+    if (chineseMatches === null || chineseMatches.length === 0) {
+      return '';
+    }
+    const chineseText = chineseMatches.join('');
+    if (chineseText.length >= 2 && chineseText.length <= 6 &&
+      chineseText.indexOf('省') < 0 &&
+      chineseText.indexOf('区') < 0 &&
+      chineseText.indexOf('县') < 0 &&
+      chineseText.indexOf('镇') < 0 &&
+      chineseText.indexOf('街') < 0) {
+      if (chineseText === '香港' || chineseText === '澳门') {
+        return chineseText;
+      }
+      return `${chineseText}市`;
+    }
+    return '';
+  }
+
+  private cleanDisplayName(name: string | undefined, fallback: string): string {
     const raw = name === undefined || name.trim().length === 0 ? fallback : name;
-    return raw.replace(', China', '').replace('中国', '').trim();
+    return raw.replace(', China', '').replace('China', '').replace('中国', '').trim();
   }
 
   private makeCityKey(cityName: string): string {
-    return cityName.trim().toLowerCase().replace(/\s+/g, '_');
+    return this.normalizeCityName(cityName).trim().toLowerCase().replace(/\s+/g, '_');
+  }
+
+  private withCityLevelName(snapshot: AqiSnapshot, cityName: string): AqiSnapshot {
+    return {
+      cityKey: this.makeCityKey(cityName),
+      cityName,
+      stationName: snapshot.stationName,
+      aqi: snapshot.aqi,
+      qualityLabel: snapshot.qualityLabel,
+      dominantPollutant: snapshot.dominantPollutant,
+      observedAt: snapshot.observedAt,
+      sourceName: snapshot.sourceName,
+      sourceUrl: snapshot.sourceUrl,
+      pollutants: snapshot.pollutants,
+      missingPollutants: snapshot.missingPollutants
+    };
   }
 }
