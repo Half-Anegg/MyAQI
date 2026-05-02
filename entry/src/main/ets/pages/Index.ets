@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
-import { AqiSnapshot, PlantState, PollutantDisplayItem, StoredCityRecord, createInitialPlantState } from '../models/AqiModels';
+import { AqiSnapshot, PlantState, PollutantDisplayItem, PollutantVector, StoredCityRecord, createInitialPlantState } from '../models/AqiModels';
 import { AqiClient } from '../services/AqiClient';
 import { LocationService } from '../services/LocationService';
 import { MockAqiService } from '../services/MockAqiService';
@@ -72,6 +72,13 @@ struct Index {
   @State cityRecords: StoredCityRecord[] = [];
   @State currentCityIndex: number = 0;
   @State detailLayoutProgress: number = 0;
+  @State testEditorExpanded: boolean = false;
+  @State testPm25Text: string = '35';
+  @State testPm10Text: string = '45';
+  @State testO3Text: string = '50';
+  @State testNo2Text: string = '28';
+  @State testSo2Text: string = '8';
+  @State testCoText: string = '4';
   @State pollutantItems: PollutantDisplayItem[] =
     buildPollutantItems(null, createInitialPlantState(PREVIEW_CITY_KEY, PREVIEW_CITY_NAME).pollutantMemory);
 
@@ -209,6 +216,73 @@ struct Index {
     return `本次刷新 ${hour}:${minute}:${second}`;
   }
 
+  private getHourKey(value: string): string {
+    if (value.length === 0) {
+      return '';
+    }
+    const date = new Date(value);
+    if (isNaN(date.getTime())) {
+      return '';
+    }
+    return `${date.getFullYear()}-${this.twoDigits(date.getMonth() + 1)}-${this.twoDigits(date.getDate())}-${this.twoDigits(date.getHours())}`;
+  }
+
+  private getCurrentRecord(): StoredCityRecord | null {
+    if (this.currentSnapshot === null) {
+      return null;
+    }
+    if (this.currentCityIndex >= 0 && this.currentCityIndex < this.cityRecords.length &&
+      this.cityRecords[this.currentCityIndex].cityKey === this.currentSnapshot.cityKey) {
+      return this.cityRecords[this.currentCityIndex];
+    }
+    for (let i = 0; i < this.cityRecords.length; i++) {
+      if (this.cityRecords[i].cityKey === this.currentSnapshot.cityKey) {
+        return this.cityRecords[i];
+      }
+    }
+    return null;
+  }
+
+  private hasCurrentCityUpdatedThisHour(): boolean {
+    const record = this.getCurrentRecord();
+    if (record === null || record.lastFetchedAt.length === 0) {
+      return false;
+    }
+    return this.getHourKey(record.lastFetchedAt) === this.getHourKey(new Date().toISOString());
+  }
+
+  private shouldRefreshCurrentCityOnTap(): boolean {
+    return this.currentSnapshot !== null && !this.isTestCity() && this.aqiClient.hasToken() &&
+      !this.hasCurrentCityUpdatedThisHour();
+  }
+
+  private hasCityData(): boolean {
+    return this.currentSnapshot !== null && this.cityRecords.length > 0;
+  }
+
+  private clearCurrentCityState(): void {
+    this.currentSnapshot = null;
+    this.currentPlant = createInitialPlantState(PREVIEW_CITY_KEY, PREVIEW_CITY_NAME);
+    this.currentCityIndex = 0;
+    this.cityInput = '';
+    this.statusText = '请选择城市，开始培育空气植物';
+    this.rebuildDisplayState();
+    this.requestRedraw();
+  }
+
+  private isTestCityInput(city: string): boolean {
+    const normalized = city.trim();
+    return normalized === '测试' || normalized.indexOf('测试') >= 0;
+  }
+
+  private makeTestCityName(city: string): string {
+    const normalized = city.trim();
+    if (normalized.length === 0 || normalized === '测试') {
+      return '测试市';
+    }
+    return normalized;
+  }
+
   private async prepareApp(): Promise<void> {
     if (this.preparing) {
       return;
@@ -225,12 +299,7 @@ struct Index {
         return;
       }
 
-      if (!this.aqiClient.hasToken()) {
-        this.statusText = '请先在 ApiConfig.ets 中配置 WAQI token';
-        this.requestRedraw();
-        return;
-      }
-      await this.refreshByLocation();
+      this.clearCurrentCityState();
     } catch (error) {
       this.statusText = this.getErrorMessage(error);
     } finally {
@@ -242,6 +311,7 @@ struct Index {
     const records = await this.plantStore.getAllCityRecords();
     this.cityRecords = records;
     if (records.length === 0) {
+      this.currentCityIndex = 0;
       return false;
     }
 
@@ -261,7 +331,10 @@ struct Index {
   private async syncSelectedCityFromStore(): Promise<void> {
     try {
       this.installSeed = await this.plantStore.getInstallSeed();
-      await this.reloadStoredRecords(true);
+      const hasRecords = await this.reloadStoredRecords(true);
+      if (!hasRecords) {
+        this.clearCurrentCityState();
+      }
     } catch (error) {
       this.statusText = this.getErrorMessage(error);
     }
@@ -345,7 +418,7 @@ struct Index {
     const width = Math.max(280, this.canvasWidth);
     const dragOffset = this.plantDragOffsetX;
     const targetIndex = this.plantDragTargetIndex;
-    const shouldSwitch = targetIndex >= 0 && targetIndex < this.cityRecords.length && Math.abs(dragOffset) > width * 0.22;
+    const shouldSwitch = targetIndex >= 0 && targetIndex < this.cityRecords.length && Math.abs(dragOffset) > width * 0.09;
 
     if (!shouldSwitch) {
       this.plantDragReturning = true;
@@ -376,9 +449,41 @@ struct Index {
       this.statusText = '请输入城市名称';
       return;
     }
+    if (this.isTestCityInput(city)) {
+      await this.loadTestCity(city);
+      return;
+    }
     await this.loadSnapshot(async (): Promise<AqiSnapshot> => {
       return this.aqiClient.fetchByCity(city);
     }, `正在查询 ${city} 的空气质量`);
+  }
+
+  private async loadTestCity(cityInput: string): Promise<void> {
+    if (this.loading) {
+      return;
+    }
+    const city = this.makeTestCityName(cityInput);
+    this.loading = true;
+    this.statusText = `正在创建 ${city} 的测试植物`;
+    try {
+      const snapshot = this.mockAqiService.createSnapshot(city, 0, 'clean');
+      const storedPlant = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      const nextPlant = updatePlantWithSnapshot(storedPlant, snapshot);
+      await this.plantStore.saveCityRecord({
+        cityKey: snapshot.cityKey,
+        cityName: snapshot.cityName,
+        snapshot,
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
+      });
+      this.lastFetchText = this.formatFetchTime();
+      await this.reloadStoredRecords(true);
+      this.statusText = `已创建 ${snapshot.cityName}，可用测试栏快速累积数据`;
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
   }
 
   private async refreshCurrent(): Promise<void> {
@@ -424,13 +529,14 @@ struct Index {
       this.lastFetchText = this.formatFetchTime();
       this.rebuildDisplayState();
       this.statusText = repeatedObservation ? '已是该城市的最新数据，植物状态未重复累计' :
-        `植物已吸收这次空气数据，成长 ${Math.min(getPlantGrowthDays(nextPlant), PLANT_MATURITY_DAYS)}/${PLANT_MATURITY_DAYS} 天`;
+        `植物已吸收这次空气数据，成长 ${getPlantGrowthDays(nextPlant)} 天`;
 
       await this.plantStore.saveCityRecord({
         cityKey: snapshot.cityKey,
         cityName: snapshot.cityName,
         snapshot,
-        plant: nextPlant
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
       });
       await this.reloadStoredRecords(true);
       this.requestRedraw();
@@ -462,7 +568,8 @@ struct Index {
           cityKey: snapshot.cityKey,
           cityName: snapshot.cityName,
           snapshot,
-          plant: finalPlant
+          plant: finalPlant,
+          lastFetchedAt: new Date().toISOString()
         });
       }
       this.lastFetchText = this.formatFetchTime();
@@ -485,6 +592,97 @@ struct Index {
     return 'clean';
   }
 
+  private formatMockValue(value: number | null): string {
+    if (value === null) {
+      return '';
+    }
+    return Math.round(value).toString();
+  }
+
+  private setMockEditorFromProfile(profile: string): void {
+    const city = this.currentSnapshot === null ? '测试市' : this.currentSnapshot.cityName;
+    const dayOffset = getPlantGrowthDays(this.currentPlant);
+    const snapshot = this.mockAqiService.createSnapshot(city, dayOffset, profile);
+    this.testPm25Text = this.formatMockValue(snapshot.pollutants.pm25);
+    this.testPm10Text = this.formatMockValue(snapshot.pollutants.pm10);
+    this.testO3Text = this.formatMockValue(snapshot.pollutants.o3);
+    this.testNo2Text = this.formatMockValue(snapshot.pollutants.no2);
+    this.testSo2Text = this.formatMockValue(snapshot.pollutants.so2);
+    this.testCoText = this.formatMockValue(snapshot.pollutants.co);
+    this.uiRevision += 1;
+    if (profile === 'polluted') {
+      this.statusText = '已预填污染模板，编辑后点击提交更新';
+    } else if (profile === 'pm25') {
+      this.statusText = '已预填 PM2.5 模板，编辑后点击提交更新';
+    } else {
+      this.statusText = '已预填清洁模板，编辑后点击提交更新';
+    }
+  }
+
+  private parseMockValue(text: string): number | null {
+    const value = Number(text.trim());
+    if (isNaN(value) || value < 0) {
+      return null;
+    }
+    return value;
+  }
+
+  private updateMockEditorValue(key: string, value: string): void {
+    if (key === 'pm25') {
+      this.testPm25Text = value;
+    } else if (key === 'pm10') {
+      this.testPm10Text = value;
+    } else if (key === 'o3') {
+      this.testO3Text = value;
+    } else if (key === 'no2') {
+      this.testNo2Text = value;
+    } else if (key === 'so2') {
+      this.testSo2Text = value;
+    } else if (key === 'co') {
+      this.testCoText = value;
+    }
+  }
+
+  private getEditedMockPollutants(): PollutantVector {
+    return {
+      pm25: this.parseMockValue(this.testPm25Text),
+      pm10: this.parseMockValue(this.testPm10Text),
+      o3: this.parseMockValue(this.testO3Text),
+      no2: this.parseMockValue(this.testNo2Text),
+      so2: this.parseMockValue(this.testSo2Text),
+      co: this.parseMockValue(this.testCoText)
+    };
+  }
+
+  private async submitEditedMockDay(): Promise<void> {
+    if (this.loading || !this.isTestCity()) {
+      return;
+    }
+    const city = this.currentSnapshot === null ? '测试市' : this.currentSnapshot.cityName;
+    const dayOffset = getPlantGrowthDays(this.currentPlant);
+    this.loading = true;
+    this.statusText = `正在提交 ${city} 的自定义模拟数据`;
+    try {
+      const snapshot = this.mockAqiService.createSnapshotWithPollutants(city, dayOffset, this.getEditedMockPollutants());
+      const storedPlant = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      const nextPlant = updatePlantWithSnapshot(storedPlant, snapshot);
+      await this.plantStore.saveCityRecord({
+        cityKey: snapshot.cityKey,
+        cityName: snapshot.cityName,
+        snapshot,
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
+      });
+      this.lastFetchText = this.formatFetchTime();
+      await this.reloadStoredRecords(true);
+      this.statusText = `已提交第 ${getPlantGrowthDays(nextPlant)} 日自定义数据`;
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
+  }
+
   private async appendMockDay(): Promise<void> {
     if (this.loading || !this.isTestCity()) {
       return;
@@ -502,11 +700,12 @@ struct Index {
         cityKey: snapshot.cityKey,
         cityName: snapshot.cityName,
         snapshot,
-        plant: nextPlant
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
       });
       this.lastFetchText = this.formatFetchTime();
       await this.reloadStoredRecords(true);
-      this.statusText = `已增加到第 ${Math.min(getPlantGrowthDays(nextPlant), PLANT_MATURITY_DAYS)}/${PLANT_MATURITY_DAYS} 日`;
+      this.statusText = `已增加到第 ${getPlantGrowthDays(nextPlant)} 日`;
     } catch (error) {
       this.statusText = this.getErrorMessage(error);
     } finally {
@@ -529,7 +728,8 @@ struct Index {
         cityKey: snapshot.cityKey,
         cityName: snapshot.cityName,
         snapshot,
-        plant: nextPlant
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
       });
       this.lastFetchText = this.formatFetchTime();
       await this.reloadStoredRecords(true);
@@ -572,14 +772,19 @@ struct Index {
     }, 40);
   }
 
-  private handlePlantTap(): void {
+  private async handlePlantTap(): Promise<void> {
+    if (this.shouldRefreshCurrentCityOnTap()) {
+      this.statusText = '正在更新本小时空气数据';
+      await this.refreshCurrent();
+      return;
+    }
     if (this.interactionActive) {
       return;
     }
     const growthDays = getPlantGrowthDays(this.currentPlant);
     this.interactionActive = true;
     this.touchPulse = 1;
-    this.leafBurstActive = growthDays >= PLANT_MATURITY_DAYS;
+    this.leafBurstActive = growthDays >= 7;
     this.leafBurstFrame = 0;
     this.statusText = this.leafBurstActive ? '成熟叶片被轻轻惊起' : '幼苗被风推了一下';
     this.drawPlant();
@@ -659,7 +864,10 @@ struct Index {
   }
 
   private getCollectedDaysText(): string {
-    const days = Math.min(getPlantGrowthDays(this.currentPlant), PLANT_MATURITY_DAYS);
+    const days = getPlantGrowthDays(this.currentPlant);
+    if (days >= PLANT_MATURITY_DAYS) {
+      return `已收集 ${days} 日`;
+    }
     return `已收集 ${days}/${PLANT_MATURITY_DAYS} 日`;
   }
 
@@ -679,7 +887,14 @@ struct Index {
   }
 
   private getPlantInfoTopPadding(): number {
-    return this.isTestCity() ? 154 : 88;
+    if (!this.isTestCity()) {
+      return 88;
+    }
+    return this.testEditorExpanded ? 246 : 154;
+  }
+
+  private getPlantInfoOpacity(): number {
+    return Math.max(0, 1 - this.detailLayoutProgress * 2.2);
   }
 
   private getStressColor(stress: number): string {
@@ -711,7 +926,7 @@ struct Index {
   private makeGrowthText(plant: PlantState): string {
     const growthDays = getPlantGrowthDays(plant);
     if (growthDays >= PLANT_MATURITY_DAYS) {
-      return `成熟 ${PLANT_MATURITY_DAYS}/${PLANT_MATURITY_DAYS} 天`;
+      return `成熟 ${growthDays} 天`;
     }
     if (growthDays === 0) {
       return '等待第一天数据';
@@ -726,6 +941,9 @@ struct Index {
   private getStageHintText(): string {
     if (this.loading || this.currentSnapshot === null) {
       return this.statusText;
+    }
+    if (this.shouldRefreshCurrentCityOnTap()) {
+      return this.cityRecords.length > 1 ? '点击植物更新本小时数据 · 左右滑动切换城市' : '点击植物更新本小时数据';
     }
     if (this.cityRecords.length > 1) {
       return this.detailLayoutProgress < 0.5 ? '左右滑动切换城市 · 纵向滑动查看 IAQI' : '左右滑动切换城市 · 纵向滑动收起 IAQI';
@@ -745,6 +963,11 @@ struct Index {
     const palette = this.plantMorphologyService.buildPaletteForPlant(plant, this.installSeed);
 
     ctx.clearRect(0, 0, width, height);
+    if (!this.hasCityData()) {
+      ctx.fillStyle = '#EEF4E8';
+      ctx.fillRect(0, 0, width, height);
+      return;
+    }
     ctx.fillStyle = palette.background;
     ctx.fillRect(0, 0, width, height);
     this.drawAirParticles(ctx, width, height, plant.particleScore, time, palette.particle);
@@ -930,22 +1153,34 @@ struct Index {
   private drawLeafBurst(ctx: CanvasRenderingContext2D, morphology: PlantMorphology): void {
     const progress = Math.min(1, this.leafBurstFrame / LEAF_BURST_DURATION);
     const alpha = Math.max(0, 1 - progress);
-    const count = 14 + Math.round(morphology.growth * 10);
+    const leafCount = morphology.leaves.length;
+    const count = Math.min(Math.max(8, leafCount), 16 + Math.round(morphology.growth * 14));
     for (let i = 0; i < count; i++) {
       const n1 = this.burstNoise(i, 1);
       const n2 = this.burstNoise(i, 2);
       const n3 = this.burstNoise(i, 3);
-      const startX = morphology.rootX + (n1 - 0.5) * (90 + morphology.growth * 120);
-      const startY = morphology.rootY - 170 - n2 * (120 + morphology.growth * 140);
-      const driftX = (n2 - 0.5) * (140 + morphology.growth * 90) * progress;
-      const fallY = (80 + n3 * 180) * progress;
-      const flutter = Math.sin(progress * 10 + i * 0.74) * (14 + n1 * 18);
+      let startX = morphology.rootX + (n1 - 0.5) * 40;
+      let startY = morphology.rootY - 70 - n2 * 60;
+      let length = 10 + n2 * 10;
+      let width = 3 + n3 * 3;
+      let color = i % 3 === 0 ? morphology.palette.leafAccent : morphology.palette.leaf;
+      if (leafCount > 0) {
+        const sourceIndex = Math.min(leafCount - 1, Math.floor(n1 * leafCount));
+        const source = morphology.leaves[sourceIndex];
+        startX = source.rootX + source.dirX * source.length * (0.28 + n2 * 0.42);
+        startY = source.rootY + source.dirY * source.length * (0.28 + n3 * 0.42);
+        length = Math.max(8, source.length * (0.42 + n2 * 0.30));
+        width = Math.max(2.4, source.width * (0.58 + n3 * 0.28));
+        color = source.damage > 0.38 ? morphology.palette.leafAccent : source.color;
+      }
+      const driftX = (n2 - 0.5) * (110 + morphology.growth * 70) * progress;
+      const fallY = (48 + n3 * 150) * progress;
+      const flutter = Math.sin(progress * 12 + i * 0.74) * (10 + n1 * 16);
       const x = startX + driftX + flutter;
       const y = startY + fallY;
       const dirX = Math.cos(progress * Math.PI * 2 + i);
       const dirY = Math.sin(progress * Math.PI * 2 + i) * 0.35 + 0.30;
-      this.drawFloatingLeaf(ctx, x, y, dirX, dirY, 11 + n2 * 11, 3 + n3 * 3,
-        i % 3 === 0 ? morphology.palette.leafAccent : morphology.palette.leaf, alpha * (0.28 + n1 * 0.46));
+      this.drawFloatingLeaf(ctx, x, y, dirX, dirY, length, width, color, alpha * (0.28 + n1 * 0.46));
     }
   }
 
@@ -1056,10 +1291,10 @@ struct Index {
   PlantInfoOverlay() {
     Column({ space: 2 }) {
       Text(this.getAqiText())
-        .fontSize(70)
+        .fontSize(58)
         .fontWeight(FontWeight.Bold)
         .fontColor(this.getQualityColorValue())
-        .lineHeight(74)
+        .lineHeight(62)
       Row({ space: 8 }) {
         Text(this.getQualityText())
           .fontSize(13)
@@ -1082,6 +1317,93 @@ struct Index {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Center)
+  }
+
+  @Builder
+  MockPollutantInput(label: string, value: string, pollutantKey: string) {
+    Column({ space: 2 }) {
+      Text(label)
+        .fontSize(10)
+        .fontColor('#5E6A63')
+      TextInput({ text: value })
+        .id(`${pollutantKey}-${this.uiRevision}`)
+        .height(28)
+        .fontSize(11)
+        .backgroundColor('#FFFFFF')
+        .borderRadius(6)
+        .onChange((nextValue: string) => {
+          this.updateMockEditorValue(pollutantKey, nextValue);
+        })
+    }
+    .layoutWeight(1)
+  }
+
+  @Builder
+  TestEditorPanel() {
+    Column({ space: 6 }) {
+      Row({ space: 6 }) {
+        Button('预填清洁')
+          .height(26)
+          .fontSize(10)
+          .backgroundColor('#DBEFE3')
+          .fontColor('#28664C')
+          .borderRadius(6)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.setMockEditorFromProfile('clean');
+          })
+        Button('预填污染')
+          .height(26)
+          .fontSize(10)
+          .backgroundColor('#F4E5E3')
+          .fontColor('#9D4150')
+          .borderRadius(6)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.setMockEditorFromProfile('polluted');
+          })
+        Button('预填PM2.5')
+          .height(26)
+          .fontSize(10)
+          .backgroundColor('#EFE7D8')
+          .fontColor('#71583A')
+          .borderRadius(6)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.setMockEditorFromProfile('pm25');
+          })
+        Button('提交更新')
+          .height(26)
+          .fontSize(10)
+          .enabled(!this.loading)
+          .backgroundColor('#4E5F86')
+          .borderRadius(6)
+          .layoutWeight(1)
+          .onClick(() => {
+            this.submitEditedMockDay();
+          })
+      }
+      .width('100%')
+
+      Row({ space: 5 }) {
+        this.MockPollutantInput('PM2.5', this.testPm25Text, 'pm25')
+        this.MockPollutantInput('PM10', this.testPm10Text, 'pm10')
+        this.MockPollutantInput('O3', this.testO3Text, 'o3')
+      }
+      .width('100%')
+
+      Row({ space: 5 }) {
+        this.MockPollutantInput('NO2', this.testNo2Text, 'no2')
+        this.MockPollutantInput('SO2', this.testSo2Text, 'so2')
+        this.MockPollutantInput('CO', this.testCoText, 'co')
+      }
+      .width('100%')
+
+    }
+    .width('100%')
+    .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+    .backgroundColor('#DCF8EFD9')
+    .borderRadius(10)
   }
 
   @Builder
@@ -1115,6 +1437,18 @@ struct Index {
           .borderRadius(7)
           .onClick(() => {
             this.resetMockFirstDay();
+          })
+        Button(this.testEditorExpanded ? '收起' : '编辑')
+          .height(28)
+          .fontSize(11)
+          .enabled(!this.loading)
+          .backgroundColor('#4E5F86')
+          .borderRadius(7)
+          .onClick(() => {
+            this.testEditorExpanded = !this.testEditorExpanded;
+            if (this.testEditorExpanded) {
+              this.setMockEditorFromProfile(this.getCurrentMockProfile());
+            }
           })
       }
       .width('100%')
@@ -1162,12 +1496,54 @@ struct Index {
           })
       }
       .width('100%')
+
+      if (this.testEditorExpanded) {
+        this.TestEditorPanel()
+      }
     }
     .width('100%')
     .padding({ left: 10, right: 10, top: 8, bottom: 8 })
-    .backgroundColor('#FFF8EA')
+    .backgroundColor('#DFFFF8EA')
     .borderRadius(12)
     .shadow({ radius: 8, color: '#14000000', offsetX: 0, offsetY: 3 })
+  }
+
+  @Builder
+  EmptyState() {
+    Column({ space: 16 }) {
+      Blank()
+      Text('选择一座城市')
+        .fontSize(30)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#26312B')
+      Text('还没有可展示的空气植物。先定位或搜索城市，系统会为每座城市保存一株独立植物。')
+        .fontSize(14)
+        .fontColor('#65716A')
+        .lineHeight(21)
+        .textAlign(TextAlign.Center)
+        .width('78%')
+      Button('去选择城市')
+        .height(44)
+        .fontSize(16)
+        .backgroundColor('#2E6D5E')
+        .borderRadius(12)
+        .padding({ left: 22, right: 22 })
+        .onClick(() => {
+          this.openCitySwitch();
+        })
+      Text(this.statusText)
+        .fontSize(12)
+        .fontColor('#78837C')
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Blank()
+    }
+    .width('100%')
+    .height('100%')
+    .alignItems(HorizontalAlign.Center)
+    .justifyContent(FlexAlign.Center)
+    .padding({ left: 24, right: 24, top: 96, bottom: 36 })
+    .backgroundColor('#EEF4E8')
   }
 
   @Builder
@@ -1205,7 +1581,7 @@ struct Index {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-          .backgroundColor('#E1EBDD')
+          .backgroundColor('#88E1EBDD')
           .borderRadius(8)
           .margin({ bottom: 22 })
       }
@@ -1221,7 +1597,7 @@ struct Index {
         .height('100%')
         .backgroundColor('#00FFFFFF')
         .gesture(
-          PanGesture({ direction: PanDirection.Horizontal, distance: 8 })
+          PanGesture({ direction: PanDirection.Horizontal, distance: 3 })
             .onActionUpdate((event) => {
               this.handlePlantDragUpdate(Number(event.offsetX));
             })
@@ -1504,41 +1880,48 @@ struct Index {
 
   build() {
     Stack({ alignContent: Alignment.Top }) {
-      this.PlantStage()
+      if (this.hasCityData()) {
+        this.PlantStage()
 
-      Column() {
-        this.PlantInfoOverlay()
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: this.getPlantInfoTopPadding() })
+        Column() {
+          this.PlantInfoOverlay()
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: this.getPlantInfoTopPadding() })
+        .opacity(this.getPlantInfoOpacity())
 
-      Column() {
-        this.DataSheet()
+        Column() {
+          this.DataSheet()
+        }
+        .width('100%')
+        .position({ x: 0, y: '100%' })
+        .translate({ y: -this.detailLayoutProgress * this.getDetailPanelHeight() })
+        .opacity(this.detailLayoutProgress)
+        .gesture(
+          PanGesture({ direction: PanDirection.Vertical, distance: 10 })
+            .onActionEnd(() => {
+              this.toggleDetailLayout();
+            })
+        )
+
+        if (this.isTestCity()) {
+          Column() {
+            this.MainTestPanel()
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 80 })
+          .zIndex(2)
+        }
+      } else {
+        this.EmptyState()
       }
-      .width('100%')
-      .position({ x: 0, y: '100%' })
-      .translate({ y: -this.detailLayoutProgress * this.getDetailPanelHeight() })
-      .opacity(this.detailLayoutProgress)
-      .gesture(
-        PanGesture({ direction: PanDirection.Vertical, distance: 10 })
-          .onActionEnd(() => {
-            this.toggleDetailLayout();
-          })
-      )
 
       Column() {
         this.TopInfoBar()
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 18 })
-
-      if (this.isTestCity()) {
-        Column() {
-          this.MainTestPanel()
-        }
-        .width('100%')
-        .padding({ left: 16, right: 16, top: 80 })
-      }
+      .zIndex(3)
     }
     .width('100%')
     .height('100%')

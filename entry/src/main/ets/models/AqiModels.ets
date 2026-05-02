@@ -20,6 +20,22 @@ export interface PlantMemory {
   co: number;
 }
 
+export interface PlantSampleCounts {
+  pm25: number;
+  pm10: number;
+  o3: number;
+  no2: number;
+  so2: number;
+  co: number;
+}
+
+export interface RecentStressSample {
+  dateKey: string;
+  sampleCount: number;
+  pollutantStress: PlantMemory;
+  pollutantSampleCounts: PlantSampleCounts;
+}
+
 export interface PlantGenome {
   seed: string;
   branchAngle: number;
@@ -59,6 +75,9 @@ export interface PlantState {
   observationDates: string[];
   averageStress: number;
   pollutantMemory: PlantMemory;
+  lifetimePollutantMemory: PlantMemory;
+  lifetimePollutantSampleCounts: PlantSampleCounts;
+  recentStressSamples: RecentStressSample[];
   heightScore: number;
   leafScore: number;
   colorScore: number;
@@ -73,6 +92,7 @@ export interface StoredCityRecord {
   cityName: string;
   snapshot: AqiSnapshot | null;
   plant: PlantState;
+  lastFetchedAt: string;
 }
 
 export interface PollutantDisplayItem {
@@ -105,7 +125,19 @@ export function createInitialMemory(): PlantMemory {
   };
 }
 
+export function createInitialSampleCounts(): PlantSampleCounts {
+  return {
+    pm25: 0,
+    pm10: 0,
+    o3: 0,
+    no2: 0,
+    so2: 0,
+    co: 0
+  };
+}
+
 export function createInitialPlantState(cityKey: string, cityName: string): PlantState {
+  const initialMemory = createInitialMemory();
   return {
     cityKey,
     cityName,
@@ -115,6 +147,9 @@ export function createInitialPlantState(cityKey: string, cityName: string): Plan
     observationDates: [],
     averageStress: 0.22,
     pollutantMemory: createInitialMemory(),
+    lifetimePollutantMemory: initialMemory,
+    lifetimePollutantSampleCounts: createInitialSampleCounts(),
+    recentStressSamples: [],
     heightScore: 0.78,
     leafScore: 0.72,
     colorScore: 0.76,

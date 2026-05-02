@@ -1,20 +1,27 @@
 import {
   AqiSnapshot,
   PlantMemory,
+  PlantSampleCounts,
   PlantState,
   PollutantDisplayItem,
   PollutantKey,
   PollutantVector,
   POLLUTANT_KEYS,
+  RecentStressSample,
+  createInitialMemory,
   createInitialPlantState,
+  createInitialSampleCounts,
   getMemoryValue,
   getPollutantLabel,
   getPollutantValue,
   setMemoryValue
 } from '../models/AqiModels';
 
-const ALPHA: number = 0.18;
 export const PLANT_MATURITY_DAYS: number = 14;
+const RECENT_MEMORY_DAYS: number = 14;
+const LIFETIME_MEMORY_WEIGHT: number = 0.60;
+const RECENT_MEMORY_WEIGHT: number = 0.35;
+const LATEST_MEMORY_WEIGHT: number = 0.05;
 
 function clamp(value: number, min: number = 0, max: number = 1): number {
   if (value < min) {
@@ -126,6 +133,110 @@ function cloneMemory(memory: PlantMemory): PlantMemory {
   };
 }
 
+function cloneSampleCounts(counts: PlantSampleCounts | undefined | null, fallbackCount: number = 0): PlantSampleCounts {
+  if (counts === undefined || counts === null) {
+    return {
+      pm25: fallbackCount,
+      pm10: fallbackCount,
+      o3: fallbackCount,
+      no2: fallbackCount,
+      so2: fallbackCount,
+      co: fallbackCount
+    };
+  }
+  return {
+    pm25: Math.max(0, Math.round(safeNumber(counts.pm25, fallbackCount))),
+    pm10: Math.max(0, Math.round(safeNumber(counts.pm10, fallbackCount))),
+    o3: Math.max(0, Math.round(safeNumber(counts.o3, fallbackCount))),
+    no2: Math.max(0, Math.round(safeNumber(counts.no2, fallbackCount))),
+    so2: Math.max(0, Math.round(safeNumber(counts.so2, fallbackCount))),
+    co: Math.max(0, Math.round(safeNumber(counts.co, fallbackCount)))
+  };
+}
+
+function getSampleCountValue(counts: PlantSampleCounts, key: PollutantKey): number {
+  switch (key) {
+    case 'pm25':
+      return counts.pm25;
+    case 'pm10':
+      return counts.pm10;
+    case 'o3':
+      return counts.o3;
+    case 'no2':
+      return counts.no2;
+    case 'so2':
+      return counts.so2;
+    case 'co':
+      return counts.co;
+    default:
+      return 0;
+  }
+}
+
+function setSampleCountValue(counts: PlantSampleCounts, key: PollutantKey, value: number): void {
+  switch (key) {
+    case 'pm25':
+      counts.pm25 = value;
+      break;
+    case 'pm10':
+      counts.pm10 = value;
+      break;
+    case 'o3':
+      counts.o3 = value;
+      break;
+    case 'no2':
+      counts.no2 = value;
+      break;
+    case 'so2':
+      counts.so2 = value;
+      break;
+    case 'co':
+      counts.co = value;
+      break;
+    default:
+      break;
+  }
+}
+
+function cloneRecentStressSample(sample: RecentStressSample): RecentStressSample {
+  return {
+    dateKey: sample.dateKey === undefined || sample.dateKey === null ? '' : sample.dateKey,
+    sampleCount: Math.max(0, Math.round(safeNumber(sample.sampleCount, 0))),
+    pollutantStress: cloneMemory(sample.pollutantStress),
+    pollutantSampleCounts: cloneSampleCounts(sample.pollutantSampleCounts)
+  };
+}
+
+function trimRecentStressSamples(samples: RecentStressSample[]): RecentStressSample[] {
+  samples.sort((left: RecentStressSample, right: RecentStressSample): number => {
+    if (left.dateKey < right.dateKey) {
+      return -1;
+    }
+    if (left.dateKey > right.dateKey) {
+      return 1;
+    }
+    return 0;
+  });
+  while (samples.length > RECENT_MEMORY_DAYS) {
+    samples.splice(0, 1);
+  }
+  return samples;
+}
+
+function cloneRecentStressSamples(samples: RecentStressSample[] | undefined | null): RecentStressSample[] {
+  if (samples === undefined || samples === null || samples.length === 0) {
+    return [];
+  }
+  const result: RecentStressSample[] = [];
+  for (let i = 0; i < samples.length; i++) {
+    const sample = cloneRecentStressSample(samples[i]);
+    if (sample.dateKey.length > 0) {
+      result.push(sample);
+    }
+  }
+  return trimRecentStressSamples(result);
+}
+
 function calculateAverageStress(memory: PlantMemory): number {
   let sum = 0;
   POLLUTANT_KEYS.forEach((key: PollutantKey) => {
@@ -163,15 +274,25 @@ export function normalizePlantState(plant: PlantState): PlantState {
   const cityName = plant.cityName === undefined || plant.cityName === null ? '未知城市' : plant.cityName;
   const fallback = createInitialPlantState(cityKey, cityName);
   const dates = getPlantObservationDates(plant);
+  const sampleCount = Math.max(0, Math.round(safeNumber(plant.sampleCount, fallback.sampleCount)));
+  const visualMemory = cloneMemory(plant.pollutantMemory);
+  const lifetimeMemory = plant.lifetimePollutantMemory === undefined || plant.lifetimePollutantMemory === null ?
+    cloneMemory(visualMemory) : cloneMemory(plant.lifetimePollutantMemory);
+  const lifetimeCounts = plant.lifetimePollutantSampleCounts === undefined ||
+    plant.lifetimePollutantSampleCounts === null ? cloneSampleCounts(null, sampleCount) :
+    cloneSampleCounts(plant.lifetimePollutantSampleCounts);
   return {
     cityKey,
     cityName,
     genomeSeed: plant.genomeSeed === undefined || plant.genomeSeed === null ? fallback.genomeSeed : plant.genomeSeed,
     lastObservedAt: plant.lastObservedAt === undefined || plant.lastObservedAt === null ? '' : plant.lastObservedAt,
-    sampleCount: Math.max(0, Math.round(safeNumber(plant.sampleCount, fallback.sampleCount))),
+    sampleCount,
     observationDates: dates,
     averageStress: clamp(safeNumber(plant.averageStress, fallback.averageStress)),
-    pollutantMemory: cloneMemory(plant.pollutantMemory),
+    pollutantMemory: visualMemory,
+    lifetimePollutantMemory: lifetimeMemory,
+    lifetimePollutantSampleCounts: lifetimeCounts,
+    recentStressSamples: cloneRecentStressSamples(plant.recentStressSamples),
     heightScore: clamp(safeNumber(plant.heightScore, fallback.heightScore)),
     leafScore: clamp(safeNumber(plant.leafScore, fallback.leafScore)),
     colorScore: clamp(safeNumber(plant.colorScore, fallback.colorScore)),
@@ -199,6 +320,108 @@ function appendObservationDate(plant: PlantState, observedAt: string): string[] 
   return dates.sort();
 }
 
+function buildLatestStressMemory(pollutants: PollutantVector, fallback: PlantMemory): PlantMemory {
+  const latest = cloneMemory(fallback);
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    const stress = normalizePollutantIndex(getPollutantValue(pollutants, key));
+    if (stress >= 0) {
+      setMemoryValue(latest, key, stress);
+    }
+  });
+  return latest;
+}
+
+function updateLifetimeMemory(base: PlantState, snapshot: AqiSnapshot): PlantMemory {
+  const nextMemory = cloneMemory(base.lifetimePollutantMemory);
+  const nextCounts = cloneSampleCounts(base.lifetimePollutantSampleCounts);
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    const stress = normalizePollutantIndex(getPollutantValue(snapshot.pollutants, key));
+    if (stress >= 0) {
+      const count = getSampleCountValue(nextCounts, key);
+      const previous = getMemoryValue(nextMemory, key);
+      setMemoryValue(nextMemory, key, count <= 0 ? stress : (previous * count + stress) / (count + 1));
+      setSampleCountValue(nextCounts, key, count + 1);
+    }
+  });
+  return nextMemory;
+}
+
+function updateLifetimeCounts(base: PlantState, snapshot: AqiSnapshot): PlantSampleCounts {
+  const nextCounts = cloneSampleCounts(base.lifetimePollutantSampleCounts);
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    const stress = normalizePollutantIndex(getPollutantValue(snapshot.pollutants, key));
+    if (stress >= 0) {
+      const count = getSampleCountValue(nextCounts, key);
+      setSampleCountValue(nextCounts, key, count + 1);
+    }
+  });
+  return nextCounts;
+}
+
+function upsertRecentStressSample(base: PlantState, snapshot: AqiSnapshot): RecentStressSample[] {
+  const dateKey = getObservationDateKey(snapshot.observedAt);
+  const samples = cloneRecentStressSamples(base.recentStressSamples);
+  let targetIndex = -1;
+  for (let i = 0; i < samples.length; i++) {
+    if (samples[i].dateKey === dateKey) {
+      targetIndex = i;
+      break;
+    }
+  }
+  if (targetIndex < 0) {
+    samples.push({
+      dateKey,
+      sampleCount: 0,
+      pollutantStress: createInitialMemory(),
+      pollutantSampleCounts: createInitialSampleCounts()
+    });
+    targetIndex = samples.length - 1;
+  }
+
+  const sample = samples[targetIndex];
+  sample.sampleCount += 1;
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    const stress = normalizePollutantIndex(getPollutantValue(snapshot.pollutants, key));
+    if (stress >= 0) {
+      const count = getSampleCountValue(sample.pollutantSampleCounts, key);
+      const previous = getMemoryValue(sample.pollutantStress, key);
+      setMemoryValue(sample.pollutantStress, key, count <= 0 ? stress : (previous * count + stress) / (count + 1));
+      setSampleCountValue(sample.pollutantSampleCounts, key, count + 1);
+    }
+  });
+
+  return trimRecentStressSamples(samples);
+}
+
+function calculateRecentMemory(samples: RecentStressSample[], fallback: PlantMemory): PlantMemory {
+  const recent = cloneMemory(fallback);
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i < samples.length; i++) {
+      if (getSampleCountValue(samples[i].pollutantSampleCounts, key) > 0) {
+        sum += getMemoryValue(samples[i].pollutantStress, key);
+        count += 1;
+      }
+    }
+    if (count > 0) {
+      setMemoryValue(recent, key, sum / count);
+    }
+  });
+  return recent;
+}
+
+function blendVisualMemory(lifetime: PlantMemory, recent: PlantMemory, latest: PlantMemory): PlantMemory {
+  const visual = cloneMemory(lifetime);
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    const value = getMemoryValue(lifetime, key) * LIFETIME_MEMORY_WEIGHT +
+      getMemoryValue(recent, key) * RECENT_MEMORY_WEIGHT +
+      getMemoryValue(latest, key) * LATEST_MEMORY_WEIGHT;
+    setMemoryValue(visual, key, clamp(value));
+  });
+  return visual;
+}
+
 export function updatePlantWithSnapshot(current: PlantState | null, snapshot: AqiSnapshot): PlantState {
   const base = current === null ? createInitialPlantState(snapshot.cityKey, snapshot.cityName) : normalizePlantState(current);
   if (base.lastObservedAt === snapshot.observedAt && snapshot.observedAt.length > 0) {
@@ -211,6 +434,9 @@ export function updatePlantWithSnapshot(current: PlantState | null, snapshot: Aq
       observationDates: getPlantObservationDates(base),
       averageStress: base.averageStress,
       pollutantMemory: cloneMemory(base.pollutantMemory),
+      lifetimePollutantMemory: cloneMemory(base.lifetimePollutantMemory),
+      lifetimePollutantSampleCounts: cloneSampleCounts(base.lifetimePollutantSampleCounts),
+      recentStressSamples: cloneRecentStressSamples(base.recentStressSamples),
       heightScore: base.heightScore,
       leafScore: base.leafScore,
       colorScore: base.colorScore,
@@ -221,21 +447,17 @@ export function updatePlantWithSnapshot(current: PlantState | null, snapshot: Aq
     };
   }
 
-  const nextMemory = cloneMemory(base.pollutantMemory);
   const observationDates = appendObservationDate(base, snapshot.observedAt);
-  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
-    const rawValue = getPollutantValue(snapshot.pollutants, key);
-    const stress = normalizePollutantIndex(rawValue);
-    if (stress >= 0) {
-      const previous = getMemoryValue(nextMemory, key);
-      setMemoryValue(nextMemory, key, previous * (1 - ALPHA) + stress * ALPHA);
-    }
-  });
-
-  const stress = calculateAverageStress(nextMemory);
+  const lifetimeMemory = updateLifetimeMemory(base, snapshot);
+  const lifetimeCounts = updateLifetimeCounts(base, snapshot);
+  const recentSamples = upsertRecentStressSample(base, snapshot);
+  const recentMemory = calculateRecentMemory(recentSamples, lifetimeMemory);
+  const latestMemory = buildLatestStressMemory(snapshot.pollutants, recentMemory);
+  const visualMemory = blendVisualMemory(lifetimeMemory, recentMemory, latestMemory);
+  const stress = calculateAverageStress(visualMemory);
   const vitality = 1 - stress;
-  const pmFine = nextMemory.pm25;
-  const oxidant = nextMemory.o3;
+  const pmFine = visualMemory.pm25;
+  const oxidant = visualMemory.o3;
 
   return {
     cityKey: snapshot.cityKey,
@@ -245,9 +467,12 @@ export function updatePlantWithSnapshot(current: PlantState | null, snapshot: Aq
     sampleCount: base.sampleCount + 1,
     observationDates,
     averageStress: stress,
-    pollutantMemory: nextMemory,
+    pollutantMemory: visualMemory,
+    lifetimePollutantMemory: lifetimeMemory,
+    lifetimePollutantSampleCounts: lifetimeCounts,
+    recentStressSamples: recentSamples,
     heightScore: clamp(0.34 + vitality * 0.58 - pmFine * 0.08),
-    leafScore: clamp(0.28 + vitality * 0.66 - nextMemory.pm10 * 0.08),
+    leafScore: clamp(0.28 + vitality * 0.66 - visualMemory.pm10 * 0.08),
     colorScore: clamp(0.22 + vitality * 0.76 - oxidant * 0.04),
     droopScore: clamp(0.08 + stress * 0.78 + pmFine * 0.08),
     bloomScore: clamp(0.08 + vitality * 0.62 - stress * 0.10),

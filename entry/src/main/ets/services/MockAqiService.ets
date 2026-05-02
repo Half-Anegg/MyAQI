@@ -24,6 +24,32 @@ export class MockAqiService {
     };
   }
 
+  createSnapshotWithPollutants(cityInput: string, dayOffset: number, pollutants: PollutantVector): AqiSnapshot {
+    const cityName = this.cityClient.normalizeCityName(cityInput.length === 0 ? '测试市' : cityInput);
+    const safePollutants: PollutantVector = {
+      pm25: pollutants.pm25,
+      pm10: pollutants.pm10,
+      o3: pollutants.o3,
+      no2: pollutants.no2,
+      so2: pollutants.so2,
+      co: pollutants.co
+    };
+    const aqi = this.estimateAqi(safePollutants);
+    return {
+      cityKey: this.makeCityKey(cityName),
+      cityName,
+      stationName: `${cityName}模拟站`,
+      aqi,
+      qualityLabel: getQualityLabel(aqi),
+      dominantPollutant: this.getDominantPollutant(safePollutants),
+      observedAt: this.makeObservedAt(dayOffset),
+      sourceName: '模拟数据',
+      sourceUrl: 'local://mock-aqi',
+      pollutants: safePollutants,
+      missingPollutants: []
+    };
+  }
+
   private createPollutants(dayOffset: number, profile: string): PollutantVector {
     const wave = dayOffset % 3;
     if (profile === 'polluted') {

@@ -102,7 +102,9 @@ export class PlantStore {
       cityKey: record.cityKey,
       cityName: record.cityName,
       snapshot: record.snapshot,
-      plant: normalizedPlant
+      plant: normalizedPlant,
+      lastFetchedAt: record.lastFetchedAt === undefined || record.lastFetchedAt === null ||
+        record.lastFetchedAt.length === 0 ? new Date().toISOString() : record.lastFetchedAt
     };
     if (!order.includes(record.cityKey)) {
       order.push(record.cityKey);
@@ -120,6 +122,45 @@ export class PlantStore {
   async getStoredPlant(cityKey: string): Promise<PlantState | null> {
     const record = await this.getCityRecord(cityKey);
     return record === null ? null : record.plant;
+  }
+
+  async deleteCityRecord(cityKey: string): Promise<void> {
+    if (cityKey.length === 0) {
+      return;
+    }
+    const pref = this.requireStore();
+    const records = await this.readRecords();
+    const order = await this.readRecordOrder();
+    const nextRecords: Record<string, StoredCityRecord> = {};
+    const keys = Object.keys(records);
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (key !== cityKey) {
+        nextRecords[key] = records[key];
+      }
+    }
+
+    const nextOrder: string[] = [];
+    for (let i = 0; i < order.length; i++) {
+      if (order[i] !== cityKey) {
+        nextOrder.push(order[i]);
+      }
+    }
+
+    const remainingKeys = this.mergeRecordKeys(Object.keys(nextRecords), nextOrder);
+    let nextLastCityKey = await this.getLastCityKey();
+    if (nextLastCityKey === cityKey) {
+      nextLastCityKey = remainingKeys.length > 0 ? remainingKeys[0] : '';
+    }
+
+    try {
+      await pref.put(RECORDS_KEY, JSON.stringify(nextRecords));
+      await pref.put(RECORD_ORDER_KEY, JSON.stringify(nextOrder));
+      await pref.put(LAST_CITY_KEY, nextLastCityKey);
+      await pref.flush();
+    } catch (error) {
+      throw new Error('删除城市植物失败');
+    }
   }
 
   private async readRecords(): Promise<Record<string, StoredCityRecord>> {
@@ -188,7 +229,8 @@ export class PlantStore {
       cityKey,
       cityName,
       snapshot: record.snapshot,
-      plant
+      plant,
+      lastFetchedAt: record.lastFetchedAt === undefined || record.lastFetchedAt === null ? '' : record.lastFetchedAt
     };
   }
 

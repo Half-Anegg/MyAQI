@@ -3,6 +3,7 @@ import { router } from '@kit.ArkUI';
 import { AqiSnapshot, StoredCityRecord } from '../models/AqiModels';
 import { AqiClient } from '../services/AqiClient';
 import { LocationService } from '../services/LocationService';
+import { MockAqiService } from '../services/MockAqiService';
 import { getPlantGrowthDays, normalizePlantState, PLANT_MATURITY_DAYS, updatePlantWithSnapshot } from '../services/PlantAlgorithm';
 import { PlantStore } from '../storage/PlantStore';
 
@@ -11,6 +12,7 @@ import { PlantStore } from '../storage/PlantStore';
 struct CitySwitch {
   private aqiClient: AqiClient = new AqiClient();
   private locationService: LocationService = new LocationService();
+  private mockAqiService: MockAqiService = new MockAqiService();
   private plantStore: PlantStore = new PlantStore();
 
   @State cityInput: string = '';
@@ -47,9 +49,55 @@ struct CitySwitch {
       this.statusText = '请输入城市名称';
       return;
     }
+    if (this.isTestCityInput(city)) {
+      await this.loadTestCity(city);
+      return;
+    }
     await this.loadSnapshot(async (): Promise<AqiSnapshot> => {
       return this.aqiClient.fetchByCity(city);
     }, `正在查询 ${city}`);
+  }
+
+  private isTestCityInput(city: string): boolean {
+    const normalized = city.trim();
+    return normalized === '测试' || normalized.indexOf('测试') >= 0;
+  }
+
+  private makeTestCityName(city: string): string {
+    const normalized = city.trim();
+    if (normalized.length === 0 || normalized === '测试') {
+      return '测试市';
+    }
+    return normalized;
+  }
+
+  private async loadTestCity(cityInput: string): Promise<void> {
+    if (this.loading) {
+      return;
+    }
+    const city = this.makeTestCityName(cityInput);
+    this.loading = true;
+    this.statusText = `正在创建 ${city} 的测试植物`;
+    try {
+      const snapshot = this.mockAqiService.createSnapshot(city, 0, 'clean');
+      const storedPlant = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      const nextPlant = updatePlantWithSnapshot(storedPlant, snapshot);
+      await this.plantStore.saveCityRecord({
+        cityKey: snapshot.cityKey,
+        cityName: snapshot.cityName,
+        snapshot,
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
+      });
+      this.lastCityKey = snapshot.cityKey;
+      await this.reloadRecords();
+      this.statusText = `已创建 ${snapshot.cityName}`;
+      this.goBack();
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
   }
 
   private async locateCity(): Promise<void> {
@@ -82,7 +130,8 @@ struct CitySwitch {
         cityKey: snapshot.cityKey,
         cityName: snapshot.cityName,
         snapshot,
-        plant: nextPlant
+        plant: nextPlant,
+        lastFetchedAt: new Date().toISOString()
       });
       this.lastCityKey = snapshot.cityKey;
       await this.reloadRecords();
@@ -109,6 +158,42 @@ struct CitySwitch {
     }
   }
 
+  private confirmDeleteRecord(record: StoredCityRecord): void {
+    AlertDialog.show({
+      title: '删除历史城市',
+      message: `确定删除 ${record.cityName} 吗？这个城市的植物生长数据将被删除，且无法恢复。`,
+      primaryButton: {
+        value: '取消',
+        action: () => {
+        }
+      },
+      secondaryButton: {
+        value: '删除',
+        fontColor: '#B94F5F',
+        action: () => {
+          this.deleteRecord(record);
+        }
+      }
+    });
+  }
+
+  private async deleteRecord(record: StoredCityRecord): Promise<void> {
+    if (this.loading) {
+      return;
+    }
+    this.loading = true;
+    try {
+      await this.plantStore.deleteCityRecord(record.cityKey);
+      this.lastCityKey = await this.plantStore.getLastCityKey();
+      await this.reloadRecords();
+      this.statusText = `已删除 ${record.cityName} 的植物数据`;
+    } catch (error) {
+      this.statusText = this.getErrorMessage(error);
+    } finally {
+      this.loading = false;
+    }
+  }
+
   private goBack(): void {
     try {
       router.back();
@@ -132,8 +217,11 @@ struct CitySwitch {
 
   private getRecordSubText(record: StoredCityRecord): string {
     const plant = normalizePlantState(record.plant);
-    const growthDays = Math.min(getPlantGrowthDays(plant), PLANT_MATURITY_DAYS);
+    const growthDays = getPlantGrowthDays(plant);
     const quality = record.snapshot === null ? '暂无 AQI' : record.snapshot.qualityLabel;
+    if (growthDays >= PLANT_MATURITY_DAYS) {
+      return `${quality} · 成长 ${growthDays} 天`;
+    }
     return `${quality} · 成长 ${growthDays}/${PLANT_MATURITY_DAYS} 天`;
   }
 
@@ -163,20 +251,31 @@ struct CitySwitch {
             .fontWeight(FontWeight.Bold)
             .fontColor(record.cityKey === this.lastCityKey ? '#2E6D5E' : '#59645E')
 
-          Text(record.cityKey === this.lastCityKey ? '当前' : '进入')
+          Button(record.cityKey === this.lastCityKey ? '当前' : '进入')
+            .height(30)
             .fontSize(12)
-            .fontColor(Color.White)
-            .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+            .enabled(!this.loading)
             .backgroundColor(record.cityKey === this.lastCityKey ? '#2E6D5E' : '#6C7B72')
             .borderRadius(8)
+            .onClick(() => {
+              this.selectRecord(record);
+            })
+
+          Button('删除')
+            .height(30)
+            .fontSize(12)
+            .enabled(!this.loading)
+            .fontColor('#B94F5F')
+            .backgroundColor('#F4E5E3')
+            .borderRadius(8)
+            .onClick(() => {
+              this.confirmDeleteRecord(record);
+            })
         }
         .width('100%')
         .padding(14)
         .backgroundColor('#FFFFFF')
         .borderRadius(12)
-        .onClick(() => {
-          this.selectRecord(record);
-        })
       }, (record: StoredCityRecord) => record.cityKey)
     }
     .width('100%')
