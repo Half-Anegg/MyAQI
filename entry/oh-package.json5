@@ -5,6 +5,8 @@
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": {}
+  "dependencies": {
+    "aggregated_share": "file:../ohos_agcit/agcit_huawei_common_share/aggregated_share"
+  }
 }
 

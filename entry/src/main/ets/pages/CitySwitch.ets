@@ -1,11 +1,13 @@
 import { common } from '@kit.AbilityKit';
 import { router } from '@kit.ArkUI';
-import { AqiSnapshot, StoredCityRecord } from '../models/AqiModels';
+import { AqiSnapshot, DEFAULT_PLANT_SPECIES, DEFAULT_POT_STYLE, StoredCityRecord } from '../models/AqiModels';
 import { AqiClient } from '../services/AqiClient';
 import { LocationService } from '../services/LocationService';
 import { MockAqiService } from '../services/MockAqiService';
 import { getPlantGrowthDays, normalizePlantState, PLANT_MATURITY_DAYS, updatePlantWithSnapshot } from '../services/PlantAlgorithm';
 import { PlantStore } from '../storage/PlantStore';
+
+const CITY_SWITCH_REQUEST_TIMEOUT_MS: number = 20000;
 
 @Entry
 @Component
@@ -14,6 +16,7 @@ struct CitySwitch {
   private locationService: LocationService = new LocationService();
   private mockAqiService: MockAqiService = new MockAqiService();
   private plantStore: PlantStore = new PlantStore();
+  private loadRequestSequence: number = 0;
 
   @State cityInput: string = '';
   @State loading: boolean = false;
@@ -80,14 +83,18 @@ struct CitySwitch {
     this.statusText = `正在创建 ${city} 的测试植物`;
     try {
       const snapshot = this.mockAqiService.createSnapshot(city, 0, 'clean');
-      const storedPlant = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      const storedRecord = await this.plantStore.getCityRecord(snapshot.cityKey);
+      const storedPlant = storedRecord === null ? null : storedRecord.plant;
       const nextPlant = updatePlantWithSnapshot(storedPlant, snapshot);
       await this.plantStore.saveCityRecord({
         cityKey: snapshot.cityKey,
         cityName: snapshot.cityName,
         snapshot,
         plant: nextPlant,
-        lastFetchedAt: new Date().toISOString()
+        lastFetchedAt: new Date().toISOString(),
+        plantSpecies: storedRecord === null ? DEFAULT_PLANT_SPECIES : storedRecord.plantSpecies,
+        potStyle: storedRecord === null ? DEFAULT_POT_STYLE : storedRecord.potStyle,
+        appearanceConfigured: false
       });
       this.lastCityKey = snapshot.cityKey;
       await this.reloadRecords();
@@ -114,33 +121,62 @@ struct CitySwitch {
     }, '正在定位当前城市');
   }
 
+  private async runSnapshotLoaderWithTimeout(loader: () => Promise<AqiSnapshot>): Promise<AqiSnapshot> {
+    let timeoutId: number = -1;
+    return await new Promise<AqiSnapshot>((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error('AQI 请求超时，请检查网络后重试'));
+      }, CITY_SWITCH_REQUEST_TIMEOUT_MS);
+      loader().then((snapshot: AqiSnapshot) => {
+        clearTimeout(timeoutId);
+        resolve(snapshot);
+      }).catch((error: Error | Object) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+    });
+  }
+
   private async loadSnapshot(loader: () => Promise<AqiSnapshot>, loadingText: string): Promise<void> {
     if (!this.aqiClient.hasToken()) {
       this.statusText = '请先在 ApiConfig.ets 中配置 WAQI token';
       return;
     }
 
+    const requestId = this.loadRequestSequence + 1;
+    this.loadRequestSequence = requestId;
     this.loading = true;
     this.statusText = loadingText;
     try {
-      const snapshot = await loader();
-      const storedPlant = await this.plantStore.getStoredPlant(snapshot.cityKey);
+      const snapshot = await this.runSnapshotLoaderWithTimeout(loader);
+      if (requestId !== this.loadRequestSequence) {
+        return;
+      }
+      const storedRecord = await this.plantStore.getCityRecord(snapshot.cityKey);
+      const storedPlant = storedRecord === null ? null : storedRecord.plant;
       const nextPlant = updatePlantWithSnapshot(storedPlant, snapshot);
       await this.plantStore.saveCityRecord({
         cityKey: snapshot.cityKey,
         cityName: snapshot.cityName,
         snapshot,
         plant: nextPlant,
-        lastFetchedAt: new Date().toISOString()
+        lastFetchedAt: new Date().toISOString(),
+        plantSpecies: storedRecord === null ? DEFAULT_PLANT_SPECIES : storedRecord.plantSpecies,
+        potStyle: storedRecord === null ? DEFAULT_POT_STYLE : storedRecord.potStyle,
+        appearanceConfigured: storedRecord === null ? false : storedRecord.appearanceConfigured
       });
       this.lastCityKey = snapshot.cityKey;
       await this.reloadRecords();
       this.statusText = `已切换到 ${snapshot.cityName}`;
       this.goBack();
     } catch (error) {
-      this.statusText = this.getErrorMessage(error);
+      if (requestId === this.loadRequestSequence) {
+        this.statusText = this.getRefreshErrorMessage(error);
+      }
     } finally {
-      this.loading = false;
+      if (requestId === this.loadRequestSequence) {
+        this.loading = false;
+      }
     }
   }
 
@@ -206,6 +242,27 @@ struct CitySwitch {
       return error.message;
     }
     return '暂时无法切换城市';
+  }
+
+  private getRefreshErrorMessage(error: Error | Object): string {
+    const message = this.getErrorMessage(error);
+    const lowerMessage = message.toLowerCase();
+    if (message.indexOf('超时') >= 0 || lowerMessage.indexOf('timeout') >= 0) {
+      return 'AQI 请求超时，请检查网络后重试';
+    }
+    if (message.indexOf('ApiConfig') >= 0 || lowerMessage.indexOf('token') >= 0 ||
+      lowerMessage.indexOf('invalid key') >= 0) {
+      return 'AQI 请求失败：WAQI token 缺失或无效';
+    }
+    if (lowerMessage.indexOf('unknown station') >= 0 || lowerMessage.indexOf('not found') >= 0 ||
+      lowerMessage.indexOf('invalid city') >= 0) {
+      return 'AQI 请求失败：未找到这个城市的 WAQI 数据';
+    }
+    if (lowerMessage.indexOf('json') >= 0 || lowerMessage.indexOf('parse') >= 0 ||
+      message.indexOf('解析') >= 0) {
+      return 'AQI 请求失败：数据解析失败，请稍后再试';
+    }
+    return `AQI 请求失败：${message}`;
   }
 
   private getRecordAqiText(record: StoredCityRecord): string {
@@ -381,9 +438,12 @@ struct CitySwitch {
       }
       .width('100%')
       .padding({ left: 18, right: 18, top: 18, bottom: 30 })
+      .justifyContent(FlexAlign.Start)
+      .alignItems(HorizontalAlign.Start)
     }
     .width('100%')
     .height('100%')
+    .align(Alignment.TopStart)
     .backgroundColor('#F4F7EF')
   }
 }

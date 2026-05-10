@@ -1,6 +1,10 @@
 export type PollutantKey = 'pm25' | 'pm10' | 'o3' | 'no2' | 'so2' | 'co';
+export type PlantSpeciesId = 'mistTree' | 'floatingFern' | 'murkyRoot';
+export type PotStyleId = 'shallowStone' | 'mistCeramic' | 'darkSlate';
 
 export const POLLUTANT_KEYS: PollutantKey[] = ['pm25', 'pm10', 'o3', 'no2', 'so2', 'co'];
+export const DEFAULT_PLANT_SPECIES: PlantSpeciesId = 'mistTree';
+export const DEFAULT_POT_STYLE: PotStyleId = 'shallowStone';
 
 export interface PollutantVector {
   pm25: number | null;
@@ -52,6 +56,32 @@ export interface PlantGenome {
   colorShiftSensitivity: number;
 }
 
+export interface PlantVisualTraits {
+  maturity: number;
+  averageStress: number;
+  pollutionPressure: number;
+  height: number;
+  leafDensity: number;
+  colorVitality: number;
+  droop: number;
+  bloom: number;
+  particles: number;
+  distortion: number;
+  health: number;
+  branchPresence: number;
+  leafPresence: number;
+  branchHealth: number;
+  leafHealth: number;
+  colorShift: number;
+  fineHaze: number;
+  coarseDust: number;
+  ozoneBleach: number;
+  nitrogenTwist: number;
+  sulfurAcid: number;
+  carbonStagnation: number;
+  sway: number;
+}
+
 export interface AqiSnapshot {
   cityKey: string;
   cityName: string;
@@ -93,6 +123,9 @@ export interface StoredCityRecord {
   snapshot: AqiSnapshot | null;
   plant: PlantState;
   lastFetchedAt: string;
+  plantSpecies: PlantSpeciesId;
+  potStyle: PotStyleId;
+  appearanceConfigured: boolean;
 }
 
 export interface PollutantDisplayItem {
@@ -112,6 +145,28 @@ export function createEmptyPollutants(): PollutantVector {
     so2: null,
     co: null
   };
+}
+
+export function isValidPlantSpecies(value: string): boolean {
+  return value === 'mistTree' || value === 'floatingFern' || value === 'murkyRoot';
+}
+
+export function isValidPotStyle(value: string): boolean {
+  return value === 'shallowStone' || value === 'mistCeramic' || value === 'darkSlate';
+}
+
+export function normalizePlantSpecies(value: string): PlantSpeciesId {
+  if (isValidPlantSpecies(value)) {
+    return value as PlantSpeciesId;
+  }
+  return DEFAULT_PLANT_SPECIES;
+}
+
+export function normalizePotStyle(value: string): PotStyleId {
+  if (isValidPotStyle(value)) {
+    return value as PotStyleId;
+  }
+  return DEFAULT_POT_STYLE;
 }
 
 export function createInitialMemory(): PlantMemory {

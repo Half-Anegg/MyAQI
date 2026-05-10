@@ -1,8 +1,18 @@
 import { describe, it, expect } from '@ohos/hypium';
 import { AqiClient } from '../main/ets/services/AqiClient';
-import { AqiSnapshot, PlantState, createInitialPlantState } from '../main/ets/models/AqiModels';
+import {
+  AqiSnapshot,
+  DEFAULT_PLANT_SPECIES,
+  DEFAULT_POT_STYLE,
+  PollutantKey,
+  PlantState,
+  createInitialPlantState,
+  normalizePlantSpecies,
+  normalizePotStyle
+} from '../main/ets/models/AqiModels';
 import {
   buildPollutantItems,
+  getPlantGrowthStageText,
   getPlantGrowthDays,
   getPlantMaturity,
   PLANT_MATURITY_DAYS,
@@ -11,6 +21,7 @@ import {
   updatePlantWithSnapshot
 } from '../main/ets/services/PlantAlgorithm';
 import { PlantMorphologyService } from '../main/ets/services/PlantMorphologyService';
+import { PlantTraitService } from '../main/ets/services/PlantTraitService';
 
 function twoDigitsForTest(value: number): string {
   if (value < 10) {
@@ -42,6 +53,56 @@ function makePlantTestSnapshot(day: number, hour: number, aqi: number, pollutant
     },
     missingPollutants: []
   };
+}
+
+function makeDateListForTest(days: number): string[] {
+  const dates: string[] = [];
+  for (let day = 1; day <= days; day++) {
+    dates.push(`2026-05-${twoDigitsForTest(day)}`);
+  }
+  return dates;
+}
+
+function makeSinglePollutantMemoryPlant(key: PollutantKey, value: number): PlantState {
+  const plant = createInitialPlantState(`single_${key}`, `Single ${key}`);
+  plant.sampleCount = PLANT_MATURITY_DAYS;
+  plant.observationDates = makeDateListForTest(PLANT_MATURITY_DAYS);
+  plant.averageStress = 0.30;
+  plant.pollutantMemory.pm25 = 0.16;
+  plant.pollutantMemory.pm10 = 0.16;
+  plant.pollutantMemory.o3 = 0.16;
+  plant.pollutantMemory.no2 = 0.16;
+  plant.pollutantMemory.so2 = 0.16;
+  plant.pollutantMemory.co = 0.16;
+  switch (key) {
+    case 'pm25':
+      plant.pollutantMemory.pm25 = value;
+      break;
+    case 'pm10':
+      plant.pollutantMemory.pm10 = value;
+      break;
+    case 'o3':
+      plant.pollutantMemory.o3 = value;
+      break;
+    case 'no2':
+      plant.pollutantMemory.no2 = value;
+      break;
+    case 'so2':
+      plant.pollutantMemory.so2 = value;
+      break;
+    case 'co':
+      plant.pollutantMemory.co = value;
+      break;
+    default:
+      break;
+  }
+  plant.lifetimePollutantMemory.pm25 = plant.pollutantMemory.pm25;
+  plant.lifetimePollutantMemory.pm10 = plant.pollutantMemory.pm10;
+  plant.lifetimePollutantMemory.o3 = plant.pollutantMemory.o3;
+  plant.lifetimePollutantMemory.no2 = plant.pollutantMemory.no2;
+  plant.lifetimePollutantMemory.so2 = plant.pollutantMemory.so2;
+  plant.lifetimePollutantMemory.co = plant.pollutantMemory.co;
+  return plant;
 }
 
 export default function localUnitTest() {
@@ -354,11 +415,172 @@ export default function localUnitTest() {
       expect(severe > calm).assertTrue();
     });
 
+    it('normalizes pollutant indexes with stronger sensitivity above fifty', 0, () => {
+      expect(Math.abs(normalizePollutantIndex(50) - 0.22) < 0.001).assertTrue();
+      expect(Math.abs(normalizePollutantIndex(100) - 0.52) < 0.001).assertTrue();
+      expect(Math.abs(normalizePollutantIndex(150) - 0.72) < 0.001).assertTrue();
+      expect(Math.abs(normalizePollutantIndex(200) - 0.86) < 0.001).assertTrue();
+      expect(Math.abs(normalizePollutantIndex(300) - 0.96) < 0.001).assertTrue();
+    });
+
+    it('derives worse visual traits once IAQI moves above fifty and one hundred', 0, () => {
+      const morphologyService = new PlantMorphologyService();
+      const traitService = new PlantTraitService();
+      const genome = morphologyService.buildGenome('seed_a', 'memory_city');
+      const calm = updatePlantWithSnapshot(createInitialPlantState('memory_city', 'Memory City'),
+        makePlantTestSnapshot(1, 8, 40, 40));
+      const lightPressure = updatePlantWithSnapshot(createInitialPlantState('memory_city', 'Memory City'),
+        makePlantTestSnapshot(1, 8, 60, 60));
+      const clearPressure = updatePlantWithSnapshot(createInitialPlantState('memory_city', 'Memory City'),
+        makePlantTestSnapshot(1, 8, 120, 120));
+
+      const calmTraits = traitService.buildTraits(calm, genome);
+      const lightTraits = traitService.buildTraits(lightPressure, genome);
+      const clearTraits = traitService.buildTraits(clearPressure, genome);
+      expect(lightTraits.droop > calmTraits.droop).assertTrue();
+      expect(lightTraits.leafHealth < calmTraits.leafHealth).assertTrue();
+      expect(clearTraits.distortion > lightTraits.distortion).assertTrue();
+      expect(clearTraits.leafDensity < lightTraits.leafDensity).assertTrue();
+    });
+
+    it('derives distinct visual signatures for each dominant pollutant', 0, () => {
+      const morphologyService = new PlantMorphologyService();
+      const traitService = new PlantTraitService();
+      const genome = morphologyService.buildGenome('seed_a', 'signature_city');
+      const pm25Traits = traitService.buildTraits(makeSinglePollutantMemoryPlant('pm25', 0.72), genome);
+      const pm10Traits = traitService.buildTraits(makeSinglePollutantMemoryPlant('pm10', 0.72), genome);
+      const o3Traits = traitService.buildTraits(makeSinglePollutantMemoryPlant('o3', 0.72), genome);
+      const no2Traits = traitService.buildTraits(makeSinglePollutantMemoryPlant('no2', 0.72), genome);
+      const so2Traits = traitService.buildTraits(makeSinglePollutantMemoryPlant('so2', 0.72), genome);
+      const coTraits = traitService.buildTraits(makeSinglePollutantMemoryPlant('co', 0.72), genome);
+
+      expect(pm25Traits.fineHaze > pm25Traits.coarseDust).assertTrue();
+      expect(pm10Traits.coarseDust > pm10Traits.fineHaze).assertTrue();
+      expect(o3Traits.ozoneBleach > pm10Traits.ozoneBleach).assertTrue();
+      expect(no2Traits.nitrogenTwist > pm25Traits.nitrogenTwist).assertTrue();
+      expect(so2Traits.sulfurAcid > o3Traits.sulfurAcid).assertTrue();
+      expect(coTraits.carbonStagnation > pm10Traits.carbonStagnation).assertTrue();
+      expect(pm10Traits.leafDensity < pm25Traits.leafDensity).assertTrue();
+      expect(pm10Traits.leafHealth < pm25Traits.leafHealth).assertTrue();
+      expect(o3Traits.colorVitality < pm10Traits.colorVitality).assertTrue();
+      expect(no2Traits.distortion > pm25Traits.distortion).assertTrue();
+      expect(so2Traits.bloom < pm10Traits.bloom).assertTrue();
+      expect(coTraits.sway < pm10Traits.sway).assertTrue();
+      expect(coTraits.leafDensity > pm10Traits.leafDensity).assertTrue();
+    });
+
+    it('passes pollutant signatures into mist tree branches and leaves', 0, () => {
+      const service = new PlantMorphologyService();
+      const pm25 = makeSinglePollutantMemoryPlant('pm25', 0.72);
+      const pm10 = makeSinglePollutantMemoryPlant('pm10', 0.72);
+      const o3 = makeSinglePollutantMemoryPlant('o3', 0.72);
+      const no2 = makeSinglePollutantMemoryPlant('no2', 0.72);
+      const so2 = makeSinglePollutantMemoryPlant('so2', 0.72);
+      pm25.cityKey = 'signature_city';
+      pm10.cityKey = 'signature_city';
+      o3.cityKey = 'signature_city';
+      no2.cityKey = 'signature_city';
+      so2.cityKey = 'signature_city';
+
+      const pm25Morphology = service.buildMorphology(pm25, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const pm10Morphology = service.buildMorphology(pm10, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const o3Morphology = service.buildMorphology(o3, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const no2Morphology = service.buildMorphology(no2, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const so2Morphology = service.buildMorphology(so2, 'seed_a', 360, 720, 0, 0, 0, 0);
+      let pm25Scar = 0;
+      let no2Scar = 0;
+      for (let i = 0; i < pm25Morphology.branches.length; i++) {
+        pm25Scar = Math.max(pm25Scar, pm25Morphology.branches[i].scar);
+      }
+      for (let i = 0; i < no2Morphology.branches.length; i++) {
+        no2Scar = Math.max(no2Scar, no2Morphology.branches[i].scar);
+      }
+      let pm10Dust = 0;
+      let pm25Dust = 0;
+      let o3Bleach = 0;
+      let pm10Bleach = 0;
+      let so2EdgeBurn = 0;
+      let pm25EdgeBurn = 0;
+      for (let i = 0; i < pm10Morphology.leaves.length; i++) {
+        pm10Dust = Math.max(pm10Dust, pm10Morphology.leaves[i].dust);
+        pm10Bleach = Math.max(pm10Bleach, pm10Morphology.leaves[i].bleach);
+      }
+      for (let i = 0; i < pm25Morphology.leaves.length; i++) {
+        pm25Dust = Math.max(pm25Dust, pm25Morphology.leaves[i].dust);
+        pm25EdgeBurn = Math.max(pm25EdgeBurn, pm25Morphology.leaves[i].edgeBurn);
+      }
+      for (let i = 0; i < o3Morphology.leaves.length; i++) {
+        o3Bleach = Math.max(o3Bleach, o3Morphology.leaves[i].bleach);
+      }
+      for (let i = 0; i < so2Morphology.leaves.length; i++) {
+        so2EdgeBurn = Math.max(so2EdgeBurn, so2Morphology.leaves[i].edgeBurn);
+      }
+
+      expect(no2Scar > pm25Scar).assertTrue();
+      expect(pm10Dust > pm25Dust).assertTrue();
+      expect(o3Bleach > pm10Bleach).assertTrue();
+      expect(so2EdgeBurn > pm25EdgeBurn).assertTrue();
+      expect(pm25Morphology.fineParticleScore > pm25Morphology.coarseParticleScore).assertTrue();
+      expect(pm10Morphology.coarseParticleScore > pm10Morphology.fineParticleScore).assertTrue();
+    });
+
+    it('returns more gradual growth stage text before maturity', 0, () => {
+      const plant = createInitialPlantState('stage', 'Stage City');
+      expect(getPlantGrowthStageText(plant)).assertEqual('待发芽');
+      plant.observationDates = makeDateListForTest(1);
+      expect(getPlantGrowthStageText(plant)).assertEqual('萌芽');
+      plant.observationDates = makeDateListForTest(3);
+      expect(getPlantGrowthStageText(plant)).assertEqual('幼苗');
+      plant.observationDates = makeDateListForTest(6);
+      expect(getPlantGrowthStageText(plant)).assertEqual('抽枝');
+      plant.observationDates = makeDateListForTest(9);
+      expect(getPlantGrowthStageText(plant)).assertEqual('展叶');
+      plant.observationDates = makeDateListForTest(12);
+      expect(getPlantGrowthStageText(plant)).assertEqual('近成熟');
+      plant.observationDates = makeDateListForTest(14);
+      plant.averageStress = 0.80;
+      expect(getPlantGrowthStageText(plant)).assertEqual('成熟 · 枯化');
+    });
+
+    it('uses mature pollutant memory peaks to avoid staying flat at stable status', 0, () => {
+      const clean = createInitialPlantState('stage_clean', 'Stage Clean City');
+      clean.observationDates = makeDateListForTest(14);
+      clean.averageStress = 0.18;
+      clean.pollutantMemory.pm25 = 0.10;
+      clean.pollutantMemory.pm10 = 0.10;
+      clean.pollutantMemory.o3 = 0.10;
+      clean.pollutantMemory.no2 = 0.10;
+      clean.pollutantMemory.so2 = 0.10;
+      clean.pollutantMemory.co = 0.10;
+
+      const peaked = createInitialPlantState('stage_peak', 'Stage Peak City');
+      peaked.observationDates = makeDateListForTest(14);
+      peaked.averageStress = 0.40;
+      peaked.pollutantMemory.pm25 = 0.72;
+      peaked.pollutantMemory.pm10 = 0.62;
+      peaked.pollutantMemory.o3 = 0.34;
+      peaked.pollutantMemory.no2 = 0.32;
+      peaked.pollutantMemory.so2 = 0.22;
+      peaked.pollutantMemory.co = 0.20;
+
+      expect(getPlantGrowthStageText(clean)).assertEqual('成熟 · 清朗');
+      expect(getPlantGrowthStageText(peaked)).assertEqual('成熟 · 承压');
+    });
+
     it('marks missing pollutant display items', 0, () => {
       const plant = createInitialPlantState('preview', '空气花园');
       const items = buildPollutantItems(null, plant.pollutantMemory);
       expect(items.length).assertEqual(6);
       expect(items[0].missing).assertTrue();
+    });
+
+    it('defaults legacy city appearance to configured mist tree and shallow stone pot', 0, () => {
+      expect(DEFAULT_PLANT_SPECIES).assertEqual('mistTree');
+      expect(DEFAULT_POT_STYLE).assertEqual('shallowStone');
+      expect(normalizePlantSpecies('floatingFern')).assertEqual('floatingFern');
+      expect(normalizePlantSpecies('unknown')).assertEqual('mistTree');
+      expect(normalizePotStyle('darkSlate')).assertEqual('darkSlate');
+      expect(normalizePotStyle('unknown')).assertEqual('shallowStone');
     });
 
     it('generates stable plant genome from user seed and city key', 0, () => {
@@ -429,6 +651,38 @@ export default function localUnitTest() {
       expect(getPlantGrowthDays(mature)).assertEqual(PLANT_MATURITY_DAYS);
       expect(matureMorphology.branches.length > seedlingMorphology.branches.length).assertTrue();
       expect(matureMorphology.leaves.length > seedlingMorphology.leaves.length).assertTrue();
+    });
+
+    it('keeps branch and leaf candidates stable across adjacent air changes', 0, () => {
+      const service = new PlantMorphologyService();
+      let medium = createInitialPlantState('memory_city', 'Memory City');
+      let better = createInitialPlantState('memory_city', 'Memory City');
+      for (let day = 1; day <= PLANT_MATURITY_DAYS; day++) {
+        medium = updatePlantWithSnapshot(medium, makePlantTestSnapshot(day, 8, 72, 72));
+        better = updatePlantWithSnapshot(better, makePlantTestSnapshot(day, 8, 58, 58));
+      }
+
+      const mediumMorphology = service.buildMorphology(medium, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const betterMorphology = service.buildMorphology(better, 'seed_a', 360, 720, 0, 0, 0, 0);
+      expect(Math.abs(mediumMorphology.branches.length - betterMorphology.branches.length) <= 2).assertTrue();
+      expect(Math.abs(mediumMorphology.leaves.length - betterMorphology.leaves.length) <= 6).assertTrue();
+      expect(betterMorphology.traits.leafHealth > mediumMorphology.traits.leafHealth).assertTrue();
+      expect(betterMorphology.traits.distortion < mediumMorphology.traits.distortion).assertTrue();
+    });
+
+    it('reduces visible mature leaves under heavier pollution', 0, () => {
+      const service = new PlantMorphologyService();
+      let clean = createInitialPlantState('leaf_city', 'Leaf City');
+      let polluted = createInitialPlantState('leaf_city', 'Leaf City');
+      for (let day = 1; day <= PLANT_MATURITY_DAYS; day++) {
+        clean = updatePlantWithSnapshot(clean, makePlantTestSnapshot(day, 8, 35, 35));
+        polluted = updatePlantWithSnapshot(polluted, makePlantTestSnapshot(day, 8, 165, 165));
+      }
+
+      const cleanMorphology = service.buildMorphology(clean, 'seed_a', 360, 720, 0, 0, 0, 0);
+      const pollutedMorphology = service.buildMorphology(polluted, 'seed_a', 360, 720, 0, 0, 0, 0);
+      expect(cleanMorphology.leaves.length > pollutedMorphology.leaves.length).assertTrue();
+      expect(cleanMorphology.traits.leafDensity > pollutedMorphology.traits.leafDensity).assertTrue();
     });
   });
 }

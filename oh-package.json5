@@ -2,6 +2,8 @@
   "modelVersion": "6.0.2",
   "description": "Please describe the basic information.",
   "dependencies": {
+    "core": "file:./ohos_agcit/agcit_huawei_common_share/aggregated_share/libs/weibo_open_sdk",
+    "aggregated_share": "file:./ohos_agcit/agcit_huawei_common_share/aggregated_share"
   },
   "devDependencies": {
     "@ohos/hypium": "1.0.25",

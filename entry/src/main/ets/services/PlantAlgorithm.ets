@@ -57,21 +57,21 @@ export function normalizePollutantIndex(value: number | null): number {
     return -1;
   }
   if (value <= 50) {
-    return clamp(value / 50 * 0.18);
+    return clamp(value / 50 * 0.22);
   }
   if (value <= 100) {
-    return 0.18 + (value - 50) / 50 * 0.22;
+    return 0.22 + (value - 50) / 50 * 0.30;
   }
   if (value <= 150) {
-    return 0.40 + (value - 100) / 50 * 0.20;
+    return 0.52 + (value - 100) / 50 * 0.20;
   }
   if (value <= 200) {
-    return 0.60 + (value - 150) / 50 * 0.18;
+    return 0.72 + (value - 150) / 50 * 0.14;
   }
   if (value <= 300) {
-    return 0.78 + (value - 200) / 100 * 0.14;
+    return 0.86 + (value - 200) / 100 * 0.10;
   }
-  return clamp(0.92 + (value - 300) / 200 * 0.08);
+  return clamp(0.96 + (value - 300) / 300 * 0.04);
 }
 
 export function getQualityLabel(aqi: number | null): string {
@@ -120,9 +120,9 @@ export function getQualityColor(aqi: number | null): string {
 
 function cloneMemory(memory: PlantMemory): PlantMemory {
   if (memory === undefined || memory === null) {
-    return createInitialPlantState('', '').pollutantMemory;
+    return createInitialMemory();
   }
-  const fallback = createInitialPlantState('', '').pollutantMemory;
+  const fallback = createInitialMemory();
   return {
     pm25: clamp(safeNumber(memory.pm25, fallback.pm25)),
     pm10: clamp(safeNumber(memory.pm10, fallback.pm10)),
@@ -311,6 +311,70 @@ export function getPlantMaturity(plant: PlantState): number {
   return clamp(getPlantGrowthDays(plant) / PLANT_MATURITY_DAYS);
 }
 
+function getMaxPollutantStress(memory: PlantMemory): number {
+  let max = 0;
+  POLLUTANT_KEYS.forEach((key: PollutantKey) => {
+    const value = getMemoryValue(memory, key);
+    if (value > max) {
+      max = value;
+    }
+  });
+  return clamp(max);
+}
+
+function calculateMatureStageStress(plant: PlantState): number {
+  const memory = plant.pollutantMemory;
+  const weightedStress = calculateAverageStress(memory);
+  const shapeStress = clamp(memory.pm25 * 0.27 + memory.pm10 * 0.23 + memory.o3 * 0.18 +
+    memory.no2 * 0.15 + memory.so2 * 0.09 + memory.co * 0.08);
+  const peakStress = getMaxPollutantStress(memory);
+  const peakPenalty = peakStress > 0.50 ? (peakStress - 0.50) * 0.34 : 0;
+  const imbalancePenalty = Math.max(0, peakStress - weightedStress) * 0.18;
+  const memoryStress = weightedStress * 0.30 + shapeStress * 0.28 + peakStress * 0.28 +
+    peakPenalty + imbalancePenalty;
+  return clamp(Math.max(plant.averageStress, memoryStress));
+}
+
+export function getPlantGrowthStageText(plantInput: PlantState): string {
+  const plant = normalizePlantState(plantInput);
+  const growthDays = getPlantGrowthDays(plant);
+  if (growthDays <= 0) {
+    return '待发芽';
+  }
+  if (growthDays <= 2) {
+    return '萌芽';
+  }
+  if (growthDays <= 5) {
+    return '幼苗';
+  }
+  if (growthDays <= 8) {
+    return '抽枝';
+  }
+  if (growthDays <= 11) {
+    return '展叶';
+  }
+  if (growthDays < PLANT_MATURITY_DAYS) {
+    return '近成熟';
+  }
+  const stress = calculateMatureStageStress(plant);
+  if (stress < 0.24) {
+    return '成熟 · 清朗';
+  }
+  if (stress < 0.36) {
+    return '成熟 · 舒展';
+  }
+  if (stress < 0.48) {
+    return '成熟 · 平稳';
+  }
+  if (stress < 0.64) {
+    return '成熟 · 承压';
+  }
+  if (stress < 0.86) {
+    return '成熟 · 枯化';
+  }
+  return '成熟 · 异化';
+}
+
 function appendObservationDate(plant: PlantState, observedAt: string): string[] {
   const dateKey = getObservationDateKey(observedAt);
   const dates = getPlantObservationDates(plant).slice();
@@ -471,12 +535,12 @@ export function updatePlantWithSnapshot(current: PlantState | null, snapshot: Aq
     lifetimePollutantMemory: lifetimeMemory,
     lifetimePollutantSampleCounts: lifetimeCounts,
     recentStressSamples: recentSamples,
-    heightScore: clamp(0.34 + vitality * 0.58 - pmFine * 0.08),
-    leafScore: clamp(0.28 + vitality * 0.66 - visualMemory.pm10 * 0.08),
-    colorScore: clamp(0.22 + vitality * 0.76 - oxidant * 0.04),
-    droopScore: clamp(0.08 + stress * 0.78 + pmFine * 0.08),
-    bloomScore: clamp(0.08 + vitality * 0.62 - stress * 0.10),
-    particleScore: clamp(0.08 + stress * 0.86),
+    heightScore: clamp(0.28 + vitality * 0.62 - pmFine * 0.12),
+    leafScore: clamp(0.18 + vitality * 0.70 - visualMemory.pm10 * 0.18),
+    colorScore: clamp(0.18 + vitality * 0.74 - oxidant * 0.12),
+    droopScore: clamp(0.10 + stress * 0.82 + pmFine * 0.12),
+    bloomScore: clamp(0.06 + vitality * 0.60 - stress * 0.18),
+    particleScore: clamp(0.08 + stress * 0.90),
     updatedAt: new Date().toISOString()
   };
 }

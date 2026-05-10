@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/Index",
-    "pages/CitySwitch"
+    "pages/CitySwitch",
+    "pages/GuideDetail"
   ]
 }

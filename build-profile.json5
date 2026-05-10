@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\hae\\.ohos\\config\\default_MyAQI_IMBsrDKjQj8bNayGQ-pEMo7pNcTIGQu6rlzCl8p1pZM=.cer",
-          "keyAlias": "debugKey",
-          "keyPassword": "0000001BB60938F6F1BE06AE732CFCA582184F9F64D039FF68E4649580213FDD6CEA48F805C1C75767D22E",
-          "profile": "C:\\Users\\hae\\.ohos\\config\\default_MyAQI_IMBsrDKjQj8bNayGQ-pEMo7pNcTIGQu6rlzCl8p1pZM=.p7b",
+          "storeFile": "C:/Users/hae/key/MyAQIkey/MyAQIKey.p12",
+          "storePassword": "00000020DE32DDB6841762BDA36A8F2C50CCA2791095AB8883AF2A3CCA65D3B2C742D504D62D177D66C7E82A76988298",
+          "keyAlias": "myaqikey",
+          "keyPassword": "00000020083889B68F196377EF4763336A0CD3DA095392E139A2C66EBBEC86E5DD1B56744A7B0FD0284D902430736406",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\hae\\.ohos\\config\\default_MyAQI_IMBsrDKjQj8bNayGQ-pEMo7pNcTIGQu6rlzCl8p1pZM=.p12",
-          "storePassword": "0000001B3EA9638DCEFDB8DD79752FA8723E4DB281858BE590BD39E330118B21AF4B6A4D2B22A0C3FF3638"
+          "profile": "C:/Users/hae/key/MyAQIkey/MyAQI_debug_profileDebug.p7b",
+          "certpath": "C:/Users/hae/key/MyAQIkey/MyAQI_debug.cer"
         }
       }
     ],
@@ -32,7 +32,7 @@
     ],
     "buildModeSet": [
       {
-        "name": "debug",
+        "name": "debug"
       },
       {
         "name": "release"
@@ -51,6 +51,14 @@
           ]
         }
       ]
+    },
+    {
+      "name": "weibo_open_sdk",
+      "srcPath": "./ohos_agcit/agcit_huawei_common_share/aggregated_share/libs/weibo_open_sdk"
+    },
+    {
+      "name": "aggregated_share",
+      "srcPath": "./ohos_agcit/agcit_huawei_common_share/aggregated_share"
     }
   ]
 }

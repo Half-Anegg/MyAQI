@@ -24,6 +24,10 @@
 /entry/src/main/ets/config/ApiConfig.ets
 !/entry/src/main/ets/config/ApiConfig.example.ets
 
+# Local assistant context
+/AGENTS.md
+/CLAUDE.md
+
 # Logs
 *.log
 npm-debug.log*

@@ -1,5 +1,6 @@
-import { PlantGenome, PlantState } from '../models/AqiModels';
-import { getPlantMaturity, normalizePlantState } from './PlantAlgorithm';
+import { PlantGenome, PlantState, PlantVisualTraits } from '../models/AqiModels';
+import { normalizePlantState } from './PlantAlgorithm';
+import { PlantTraitService } from './PlantTraitService';
 
 export interface PlantPalette {
   background: string;
@@ -26,6 +27,10 @@ export interface MorphBranch {
   color: string;
   alpha: number;
   rupture: number;
+  presence: number;
+  health: number;
+  twist: number;
+  scar: number;
 }
 
 export interface MorphLeaf {
@@ -38,6 +43,11 @@ export interface MorphLeaf {
   color: string;
   alpha: number;
   damage: number;
+  presence: number;
+  health: number;
+  dust: number;
+  bleach: number;
+  edgeBurn: number;
 }
 
 export interface MorphBud {
@@ -51,15 +61,19 @@ export interface MorphBud {
 export interface PlantMorphology {
   genome: PlantGenome;
   palette: PlantPalette;
+  traits: PlantVisualTraits;
   branches: MorphBranch[];
   leaves: MorphLeaf[];
   buds: MorphBud[];
   rootX: number;
   rootY: number;
+  potBottomY: number;
   growth: number;
   stress: number;
   distortion: number;
   particleScore: number;
+  fineParticleScore: number;
+  coarseParticleScore: number;
 }
 
 interface GrowthCounter {
@@ -84,15 +98,17 @@ class DeterministicRandom {
 }
 
 export class PlantMorphologyService {
+  private traitService: PlantTraitService = new PlantTraitService();
+
   buildGenome(installSeed: string, cityKey: string): PlantGenome {
     const seedText = `${installSeed}:${cityKey}`;
     const rng = new DeterministicRandom(this.hashString(seedText));
     const primaryHue = rng.between(34, 326);
     return {
       seed: seedText,
-      branchAngle: rng.between(0.28, 1.12),
-      branchSpread: rng.between(0.55, 1.58),
-      segmentScale: rng.between(0.64, 1.42),
+      branchAngle: rng.between(0.24, 0.88),
+      branchSpread: rng.between(0.56, 1.24),
+      segmentScale: rng.between(0.64, 1.28),
       curl: rng.between(-1.36, 1.36),
       asymmetry: rng.between(-0.88, 0.88),
       leafRhythm: rng.between(0.44, 1.88),
@@ -117,37 +133,44 @@ export class PlantMorphologyService {
   ): PlantMorphology {
     const plant = normalizePlantState(plantInput);
     const genome = this.buildGenome(installSeed, plant.cityKey);
-    const palette = this.buildPalette(plant, genome);
-    const maturity = getPlantMaturity(plant);
-    const distortion = this.getDistortionScore(plant, genome);
+    const traits = this.traitService.buildTraits(plant, genome);
+    const palette = this.buildPalette(plant, genome, traits);
+    const maturity = traits.maturity;
+    const distortion = traits.distortion;
     const growth = 0.20 + maturity * 0.80;
     const rootX = width / 2 + offsetX;
-    const rootY = height - 40 - verticalShift;
+    const potBottomY = height - verticalShift;
+    const rootY = potBottomY - 49;
     const result: PlantMorphology = {
       genome,
       palette,
+      traits,
       branches: [],
       leaves: [],
       buds: [],
       rootX,
       rootY,
+      potBottomY,
       growth,
-      stress: plant.averageStress,
+      stress: traits.averageStress,
       distortion,
-      particleScore: plant.particleScore
+      particleScore: traits.particles,
+      fineParticleScore: traits.fineHaze,
+      coarseParticleScore: traits.coarseDust
     };
 
-    const maxDepth = this.getIterationDepth(maturity);
-    const heightScore = 0.62 + plant.heightScore * 0.38;
-    const stressShorten = 1 - plant.pollutantMemory.pm25 * 0.25 - distortion * 0.18;
-    const baseLength = (62 + maturity * 124) * genome.segmentScale * heightScore * stressShorten;
+    const maxDepth = 4;
+    const baseLength = (52 + maturity * 152) * genome.segmentScale * (0.68 + traits.height * 0.38) *
+      (1 - distortion * 0.10);
     const baseWidth = 4.4 + growth * 4.8;
     const pulseCurve = Math.sin((1 - pulse) * Math.PI);
     const pulseDirection = genome.asymmetry >= 0 ? 1 : -1;
     const interactionSwing = pulseCurve * pulseDirection * (0.04 + (1 - maturity) * 0.24);
-    const initialAngle = -Math.PI / 2 + genome.asymmetry * 0.12 + plant.droopScore * 0.12 + interactionSwing;
+    const initialAngle = -Math.PI / 2 + genome.asymmetry * 0.06 + traits.droop * 0.10 +
+      traits.nitrogenTwist * genome.asymmetry * 0.08 + interactionSwing;
     const counter: GrowthCounter = { value: 1 };
-    this.growBranch(result, plant, genome, counter, 0, maxDepth, rootX, rootY, initialAngle, baseLength, baseWidth, time);
+    this.growBranch(result, plant, genome, counter, 0, maxDepth, rootX, rootY, initialAngle, baseLength, baseWidth,
+      time, 1);
 
     if (pulse > 0) {
       result.buds.push({
@@ -165,36 +188,18 @@ export class PlantMorphologyService {
   buildPaletteForPlant(plantInput: PlantState, installSeed: string): PlantPalette {
     const plant = normalizePlantState(plantInput);
     const genome = this.buildGenome(installSeed, plant.cityKey);
-    return this.buildPalette(plant, genome);
+    const traits = this.traitService.buildTraits(plant, genome);
+    return this.buildPalette(plant, genome, traits);
   }
 
   getDistortionScore(plantInput: PlantState, genome: PlantGenome): number {
     const plant = normalizePlantState(plantInput);
-    const memory = plant.pollutantMemory;
-    const stressBase = this.clamp((plant.averageStress - 0.16) * 1.95);
-    const pollutantShapePressure = memory.pm25 * 0.28 + memory.pm10 * 0.24 + memory.no2 * 0.20 +
-      memory.o3 * 0.18 + memory.so2 * 0.10 + memory.co * 0.08;
-    return this.clamp((stressBase + pollutantShapePressure * 0.72) * (0.76 + genome.alienSensitivity * 0.68));
+    return this.traitService.buildTraits(plant, genome).distortion;
   }
 
   getColorPollutionShift(plantInput: PlantState, genome: PlantGenome): number {
     const plant = normalizePlantState(plantInput);
-    const memory = plant.pollutantMemory;
-    return this.clamp((plant.averageStress * 0.78 + memory.o3 * 0.14 + memory.pm10 * 0.08) *
-      genome.colorShiftSensitivity);
-  }
-
-  private getIterationDepth(maturity: number): number {
-    if (maturity < 0.22) {
-      return 1;
-    }
-    if (maturity < 0.50) {
-      return 2;
-    }
-    if (maturity < 0.86) {
-      return 3;
-    }
-    return 4;
+    return this.traitService.buildTraits(plant, genome).colorShift;
   }
 
   private growBranch(
@@ -209,96 +214,119 @@ export class PlantMorphologyService {
     angle: number,
     length: number,
     width: number,
-    time: number
+    time: number,
+    parentPresence: number
   ): void {
     const nodeId = counter.value;
     counter.value += 1;
-    const maturity = getPlantMaturity(plant);
-    const vitality = 1 - plant.averageStress;
+    const traits = result.traits;
+    const maturity = traits.maturity;
     const distortion = result.distortion;
     const noise = this.noise(genome.seed, nodeId * 17);
+    const slotNoise = this.noise(genome.seed, nodeId * 19);
+    const levelStart = level === 0 ? 0 : 0.10 + level * 0.17 + slotNoise * 0.10;
+    const levelPresence = level === 0 ? 0.45 + maturity * 0.55 :
+      this.smoothstep(levelStart - 0.14, levelStart + 0.18, maturity);
+    const presence = this.clamp(parentPresence * levelPresence *
+      (level === 0 ? 1 : (0.42 + traits.branchPresence * 0.58)));
+    const healthNoise = this.noise(genome.seed, nodeId * 97) - 0.5;
+    const branchHealth = this.clamp(traits.branchHealth - distortion * (0.06 + level * 0.055) +
+      healthNoise * 0.12, 0.04, 1);
     const rootStability = level === 0 ? 0.28 : (level === 1 ? 0.56 : 1);
     const droopInfluence = level === 0 ? 0.08 : (level === 1 ? 0.14 : 0.24);
-    const terminalBend = level >= maxDepth - 1 ?
-      (this.noise(genome.seed, nodeId * 137) - 0.5) * distortion * (0.78 + plant.pollutantMemory.o3 * 0.55) : 0;
+    const localTwist = this.clamp(traits.nitrogenTwist * (0.58 + this.noise(genome.seed, nodeId * 151) * 0.84));
+    const terminalBend = level >= maxDepth - 1 ? (this.noise(genome.seed, nodeId * 137) - 0.5) *
+      (distortion * 0.62 + localTwist * 1.18 + (1 - branchHealth) * 0.54) : 0;
     const kink = ((noise - 0.5) * distortion * 0.95 + genome.curl * 0.16) * rootStability +
-      plant.droopScore * droopInfluence + terminalBend;
+      traits.droop * droopInfluence + localTwist * (noise - 0.5) * 0.28 * rootStability + terminalBend;
     const swayStability = level === 0 ? 0.48 : 1;
-    const sway = Math.sin(time * 0.72 + nodeId * 0.83) * (0.025 + vitality * 0.028) *
-      (1 - distortion * 0.35) * swayStability;
+    const sway = Math.sin(time * 0.72 + nodeId * 0.83) * (0.010 + traits.sway * 0.034) *
+      (1 - distortion * 0.22) * swayStability;
     const endAngle = angle + kink + sway;
-    const endX = startX + Math.cos(endAngle) * length;
-    const endY = startY + Math.sin(endAngle) * length;
+    const effectiveLength = length * (0.34 + presence * 0.66) * (0.70 + branchHealth * 0.30);
+    const effectiveWidth = Math.max(0.9, width * (0.44 + presence * 0.56) * (0.72 + branchHealth * 0.28));
+    const endX = startX + Math.cos(endAngle) * effectiveLength;
+    const endY = startY + Math.sin(endAngle) * effectiveLength;
     const controlNoise = this.noise(genome.seed, nodeId * 31) - 0.5;
-    const controlAngle = angle + kink * 0.56 + controlNoise * distortion * 0.74 * rootStability;
-    const controlDistance = length * (0.44 + this.noise(genome.seed, nodeId * 43) * 0.16);
+    const controlAngle = angle + kink * 0.56 + controlNoise * (distortion * 0.64 + localTwist * 0.48) * rootStability;
+    const controlDistance = effectiveLength * (0.44 + this.noise(genome.seed, nodeId * 43) * 0.16);
     const controlX = startX + Math.cos(controlAngle) * controlDistance;
     const controlY = startY + Math.sin(controlAngle) * controlDistance;
-    const rupture = distortion < 0.32 ? 0 : this.clamp((distortion - 0.32) * 1.75 + (noise - 0.5) * 0.42);
+    const rupture = this.clamp((distortion - 0.26) * 1.36 + localTwist * 0.58 +
+      (1 - branchHealth) * 0.42 + (noise - 0.5) * 0.34);
+    const scar = this.clamp(rupture * 0.52 + localTwist * 0.56 + traits.sulfurAcid * 0.10);
+    const alpha = this.clamp(presence * (0.24 + branchHealth * 0.72) - rupture * 0.08);
 
-    result.branches.push({
-      startX,
-      startY,
-      controlX,
-      controlY,
-      endX,
-      endY,
-      width,
-      color: level === 0 ? result.palette.stemDark : result.palette.stem,
-      alpha: 0.74 + vitality * 0.24 - rupture * 0.18,
-      rupture
-    });
+    if (alpha > 0.025) {
+      result.branches.push({
+        startX,
+        startY,
+        controlX,
+        controlY,
+        endX,
+        endY,
+        width: effectiveWidth,
+        color: level === 0 ? result.palette.stemDark : result.palette.stem,
+        alpha,
+        rupture,
+        presence,
+        health: branchHealth,
+        twist: localTwist,
+        scar
+      });
 
-    this.addLeaves(result, plant, genome, nodeId, level, startX, startY, controlX, controlY, endX, endY);
+      this.addLeaves(result, plant, genome, nodeId, level, startX, startY, controlX, controlY, endX, endY, presence,
+        branchHealth);
+    }
 
     if (level >= maxDepth) {
-      if (maturity > 0.66 && vitality > 0.32) {
+      const budAlpha = presence * traits.bloom * (0.38 + branchHealth * 0.62);
+      if (budAlpha > 0.05) {
         result.buds.push({
           x: endX,
           y: endY,
-          radius: 2.6 + plant.bloomScore * 4.6 * maturity,
+          radius: (2.2 + traits.bloom * 4.8 * maturity) * (0.72 + branchHealth * 0.28),
           color: result.palette.bloom,
-          alpha: 0.18 + vitality * 0.32
+          alpha: this.clamp(budAlpha * 0.72)
         });
       }
       return;
     }
 
-    const nextLength = length * (0.68 + genome.segmentScale * 0.08 - plant.averageStress * 0.06);
-    const nextWidth = Math.max(1.4, width * (0.68 - distortion * 0.08));
-    const continuationAngle = endAngle + (this.noise(genome.seed, nodeId * 59) - 0.5) *
-      (0.16 + distortion * 0.42) * rootStability;
-    this.growBranch(result, plant, genome, counter, level + 1, maxDepth, endX, endY, continuationAngle,
-      nextLength, nextWidth, time);
-
-    if (maturity < 0.18) {
+    if (presence <= 0.018) {
       return;
     }
 
-    let branchPairs = 1;
-    if (maturity > 0.62 && level <= 1 && distortion < 0.46) {
-      branchPairs = 2;
-    }
-    if (distortion > 0.48 && level > 0) {
-      branchPairs = Math.max(0, branchPairs - 1);
-    }
-    if (level >= 3 && distortion < 0.62) {
-      branchPairs = 0;
-    }
-    for (let i = 0; i < branchPairs; i++) {
+    const nextLength = length * (0.66 + genome.segmentScale * 0.08 - traits.pollutionPressure * 0.05);
+    const nextWidth = Math.max(1.2, width * (0.68 - distortion * 0.06));
+    const continuationAngle = endAngle + (this.noise(genome.seed, nodeId * 59) - 0.5) *
+      (0.16 + distortion * 0.42) * rootStability;
+    this.growBranch(result, plant, genome, counter, level + 1, maxDepth, endX, endY, continuationAngle,
+      nextLength, nextWidth, time, presence);
+
+    const sideSlots = this.getSideSlotCount(level);
+    for (let i = 0; i < sideSlots; i++) {
       const sideSeed = this.noise(genome.seed, nodeId * 73 + i * 11);
       let side = i % 2 === 0 ? -1 : 1;
       if (distortion > 0.58 && sideSeed > 0.62) {
         side *= -1;
       }
-      const angleNoise = (sideSeed - 0.5) * (0.22 + distortion * 0.85);
-      const sideAngle = endAngle + side * genome.branchAngle * genome.branchSpread +
-        genome.asymmetry * 0.36 + angleNoise;
+      const sideUnlock = 0.18 + level * 0.16 + i * 0.12 + sideSeed * 0.12;
+      const sidePresence = presence * this.smoothstep(sideUnlock - 0.14, sideUnlock + 0.18, maturity) *
+        (0.28 + traits.branchPresence * 0.72);
+      if (sidePresence <= 0.016) {
+        continue;
+      }
+      const sideOpening = this.clamp(genome.branchAngle * genome.branchSpread + traits.nitrogenTwist * 0.10,
+        0.22, 0.82);
+      const angleNoise = (sideSeed - 0.5) * (0.18 + distortion * 0.36 + traits.nitrogenTwist * 0.54);
+      const sideAngle = endAngle + side * sideOpening + genome.asymmetry * 0.22 +
+        traits.nitrogenTwist * side * (sideSeed - 0.5) * 0.24 + angleNoise;
       const sideLength = length * (0.38 + maturity * 0.20 + sideSeed * 0.12) *
-        (1 - plant.pollutantMemory.pm25 * 0.14 - distortion * 0.12);
+        (1 - plant.pollutantMemory.pm25 * 0.12 - distortion * 0.10);
       const sideWidth = Math.max(1.2, width * (0.46 + maturity * 0.10));
       this.growBranch(result, plant, genome, counter, level + 1, maxDepth, endX, endY, sideAngle,
-        sideLength, sideWidth, time);
+        sideLength, sideWidth, time, sidePresence);
     }
   }
 
@@ -313,17 +341,16 @@ export class PlantMorphologyService {
     controlX: number,
     controlY: number,
     endX: number,
-    endY: number
+    endY: number,
+    branchPresence: number,
+    branchHealth: number
   ): void {
-    const maturity = getPlantMaturity(plant);
+    const traits = result.traits;
+    const maturity = traits.maturity;
     const distortion = result.distortion;
-    const leafBase = maturity < 0.24 ? 1 : 1 + Math.round(maturity * 2 + plant.leafScore * 1.6);
-    const leafLoss = maturity < 0.34 ? distortion * 0.20 :
-      distortion * (0.38 + plant.pollutantMemory.pm10 * 0.42 + plant.averageStress * 0.24);
-    const count = level === 0 && maturity < 0.24 ? 1 :
-      Math.max(0, Math.round(leafBase * genome.leafRhythm * (1 - this.clamp(leafLoss, 0, 0.74))));
-    for (let i = 0; i < count; i++) {
-      const progress = (i + 1) / (count + 1);
+    const leafSlots = level === 0 ? 3 : 4;
+    for (let i = 0; i < leafSlots; i++) {
+      const progress = (i + 1) / (leafSlots + 1);
       const x = this.quadraticPoint(startX, controlX, endX, progress);
       const y = this.quadraticPoint(startY, controlY, endY, progress);
       const tangentX = this.quadraticTangent(startX, controlX, endX, progress);
@@ -332,6 +359,21 @@ export class PlantMorphologyService {
       const normalX = -tangentY / tangentLength;
       const normalY = tangentX / tangentLength;
       const leafNoise = this.noise(genome.seed, nodeId * 101 + i * 13);
+      const unlock = 0.10 + i * 0.12 + level * 0.055 + leafNoise * 0.10;
+      const slotPresence = this.smoothstep(unlock - 0.12, unlock + 0.16, maturity);
+      let presence = this.clamp(branchPresence * slotPresence * (0.32 + traits.leafPresence * 0.68) *
+        (0.34 + traits.leafDensity * 0.66));
+      if (level === 0 && i === 0 && maturity > 0) {
+        presence = Math.max(presence, 0.46 + maturity * 0.18);
+      }
+      const pollutionLeafLoss = this.smoothstep(0.30, 0.78, traits.pollutionPressure + distortion * 0.14 +
+        traits.coarseDust * 0.30 + traits.sulfurAcid * 0.10);
+      const slotHardiness = 0.24 + leafNoise * 0.58 + (level === 0 ? 0.10 : 0) + (i === 0 ? 0.08 : 0);
+      const leafSurvival = 1 - this.smoothstep(slotHardiness - 0.18, slotHardiness + 0.18, pollutionLeafLoss);
+      presence = this.clamp(presence * (0.12 + leafSurvival * 0.88));
+      if (presence <= 0.018) {
+        continue;
+      }
       let side = (i + level) % 2 === 0 ? -1 : 1;
       if (distortion > 0.55 && leafNoise > 0.58) {
         side *= -1;
@@ -339,12 +381,24 @@ export class PlantMorphologyService {
       const tangentPull = distortion * (leafNoise - 0.5) * 0.72;
       const dirX = normalX * side + tangentX / tangentLength * tangentPull;
       const dirY = normalY * side + tangentY / tangentLength * tangentPull;
-      const damage = this.clamp((distortion * 0.74 + plant.averageStress * 0.22) *
-        (0.38 + plant.pollutantMemory.pm10 * 0.38 + plant.pollutantMemory.o3 * 0.28) *
-        (0.66 + leafNoise * 0.86));
-      const length = (10 + maturity * 28 + plant.leafScore * 10) * (0.72 + (1 - progress) * 0.24) *
-        (1 - damage * 0.30);
-      const width = (3.2 + maturity * 5.6) * (1 - damage * 0.18);
+      const dust = this.clamp((traits.coarseDust * 0.82 + traits.pollutionPressure * 0.12) *
+        (0.52 + leafNoise * 0.92));
+      const bleach = this.clamp((traits.ozoneBleach * 0.88 + traits.carbonStagnation * 0.12) *
+        (0.56 + this.noise(genome.seed, nodeId * 109 + i * 17) * 0.82));
+      const edgeBurn = this.clamp((traits.sulfurAcid * 0.74 + traits.ozoneBleach * 0.30) *
+        (0.52 + this.noise(genome.seed, nodeId * 113 + i * 19) * 0.88));
+      const damage = this.clamp((distortion * 0.42 + traits.pollutionPressure * 0.18 +
+        dust * 0.40 + bleach * 0.34 + edgeBurn * 0.34) * (0.66 + leafNoise * 0.86));
+      const leafHealth = this.clamp(traits.leafHealth + branchHealth * 0.24 - damage * 0.34 +
+        (leafNoise - 0.5) * 0.12 - traits.carbonStagnation * 0.08, 0.04, 1);
+      const length = (9 + maturity * 36 + traits.leafDensity * 12) * (0.72 + (1 - progress) * 0.24) *
+        (0.50 + presence * 0.50) * (0.72 + leafHealth * 0.28) * (1 - damage * 0.22 - dust * 0.10);
+      const width = (3.0 + maturity * 7.2) * (0.54 + presence * 0.46) * (1 - damage * 0.12 - dust * 0.10);
+      const alpha = this.clamp(presence * (0.20 + leafHealth * 0.72) - damage * 0.08 -
+        traits.carbonStagnation * 0.06);
+      if (alpha <= 0.025) {
+        continue;
+      }
       result.leaves.push({
         rootX: x,
         rootY: y,
@@ -354,24 +408,34 @@ export class PlantMorphologyService {
         width,
         color: damage > 0.58 ? result.palette.leafShadow :
           (damage > 0.34 && leafNoise > 0.38 ? result.palette.leafAccent : result.palette.leaf),
-        alpha: 0.58 + plant.leafScore * 0.34 - damage * 0.30,
-        damage
+        alpha,
+        damage,
+        presence,
+        health: leafHealth,
+        dust,
+        bleach,
+        edgeBurn
       });
     }
   }
 
-  private buildPalette(plant: PlantState, genome: PlantGenome): PlantPalette {
-    const colorShift = this.getColorPollutionShift(plant, genome);
-    const vitality = 1 - plant.averageStress;
-    const leafHue = this.wrapHue(genome.primaryHue + plant.pollutantMemory.o3 * 36 - colorShift * 42);
-    const accentHue = this.wrapHue(genome.secondaryHue + colorShift * 92);
-    const stemHue = this.wrapHue(leafHue + genome.stemHueOffset - colorShift * 18);
-    const leafSaturation = this.clamp(0.46 + plant.colorScore * 0.30 - colorShift * 0.42, 0.12, 0.78);
-    const leafLight = this.clamp(0.36 + vitality * 0.18 - colorShift * 0.12, 0.23, 0.58);
-    const accentSaturation = this.clamp(leafSaturation * (0.72 - colorShift * 0.16), 0.08, 0.62);
-    const accentLight = this.clamp(leafLight - 0.08 - colorShift * 0.04, 0.18, 0.46);
-    const backgroundSat = this.clamp(0.18 - colorShift * 0.08, 0.06, 0.20);
-    const backgroundLight = this.clamp(0.92 - colorShift * 0.08, 0.82, 0.94);
+  private buildPalette(plant: PlantState, genome: PlantGenome, traits: PlantVisualTraits): PlantPalette {
+    const colorShift = traits.colorShift;
+    const vitality = traits.colorVitality;
+    const leafHue = this.wrapHue(genome.primaryHue + traits.ozoneBleach * 54 -
+      traits.sulfurAcid * 24 - colorShift * 36);
+    const accentHue = this.wrapHue(genome.secondaryHue + colorShift * 72 + traits.sulfurAcid * 58);
+    const stemHue = this.wrapHue(leafHue + genome.stemHueOffset - colorShift * 14 - traits.nitrogenTwist * 10);
+    const leafSaturation = this.clamp(0.36 + vitality * 0.40 - colorShift * 0.28 -
+      traits.ozoneBleach * 0.20 - traits.carbonStagnation * 0.16, 0.08, 0.82);
+    const leafLight = this.clamp(0.31 + vitality * 0.24 + traits.ozoneBleach * 0.08 -
+      colorShift * 0.11 - traits.carbonStagnation * 0.06, 0.20, 0.64);
+    const accentSaturation = this.clamp(leafSaturation * (0.72 - colorShift * 0.12) +
+      traits.sulfurAcid * 0.08, 0.08, 0.66);
+    const accentLight = this.clamp(leafLight - 0.08 - colorShift * 0.03 + traits.sulfurAcid * 0.04, 0.18, 0.50);
+    const backgroundSat = this.clamp(0.18 - colorShift * 0.06 - traits.fineHaze * 0.08, 0.04, 0.20);
+    const backgroundLight = this.clamp(0.92 - colorShift * 0.05 - traits.fineHaze * 0.08 -
+      traits.coarseDust * 0.03, 0.80, 0.94);
 
     return {
       background: this.hslString(leafHue, backgroundSat, backgroundLight),
@@ -382,12 +446,31 @@ export class PlantMorphologyService {
       leafShadow: this.hslString(leafHue, this.clamp(leafSaturation * 0.62, 0.10, 0.44), this.clamp(leafLight - 0.15, 0.16, 0.34)),
       bloom: this.hslString(genome.bloomHue, this.clamp(0.46 + vitality * 0.28 - colorShift * 0.16, 0.18, 0.74),
         this.clamp(0.46 + vitality * 0.16, 0.32, 0.64)),
-      lesion: this.hslString(16 + plant.pollutantMemory.o3 * 42, this.clamp(0.36 + colorShift * 0.34, 0.28, 0.78),
-        this.clamp(0.28 + colorShift * 0.08, 0.24, 0.42)),
+      lesion: this.hslString(18 + traits.ozoneBleach * 34 + traits.sulfurAcid * 42,
+        this.clamp(0.34 + colorShift * 0.28 + traits.sulfurAcid * 0.16, 0.28, 0.82),
+        this.clamp(0.28 + colorShift * 0.07 + traits.sulfurAcid * 0.05, 0.24, 0.46)),
       soil: this.hslString(26 + colorShift * 12, 0.30, 0.45 - colorShift * 0.05),
       soilDark: this.hslString(28 + colorShift * 10, 0.28, 0.25 - colorShift * 0.03),
-      particle: colorShift > 0.48 ? '#5F5C58' : '#6C716C'
+      particle: traits.coarseDust > traits.fineHaze ? '#766F62' : (colorShift > 0.48 ? '#5F5C58' : '#6C716C')
     };
+  }
+
+  private getSideSlotCount(level: number): number {
+    if (level <= 1) {
+      return 2;
+    }
+    if (level === 2) {
+      return 1;
+    }
+    return 0;
+  }
+
+  private smoothstep(edge0: number, edge1: number, value: number): number {
+    if (edge0 === edge1) {
+      return value < edge0 ? 0 : 1;
+    }
+    const progress = this.clamp((value - edge0) / (edge1 - edge0));
+    return progress * progress * (3 - 2 * progress);
   }
 
   private hashString(value: string): number {

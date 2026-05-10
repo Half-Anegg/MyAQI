@@ -1,6 +1,16 @@
 import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
-import { PlantState, StoredCityRecord, createInitialPlantState } from '../models/AqiModels';
+import {
+  DEFAULT_PLANT_SPECIES,
+  DEFAULT_POT_STYLE,
+  PlantSpeciesId,
+  PlantState,
+  PotStyleId,
+  StoredCityRecord,
+  createInitialPlantState,
+  normalizePlantSpecies,
+  normalizePotStyle
+} from '../models/AqiModels';
 import { normalizePlantState } from '../services/PlantAlgorithm';
 
 const STORE_NAME: string = 'aqi_plant_store';
@@ -98,13 +108,18 @@ export class PlantStore {
     const installSeed = await this.getInstallSeed();
     const normalizedPlant = normalizePlantState(record.plant);
     normalizedPlant.genomeSeed = installSeed;
+    const species = this.normalizeSpecies(record.plantSpecies);
+    const potStyle = this.normalizePotStyle(record.potStyle);
     records[record.cityKey] = {
       cityKey: record.cityKey,
       cityName: record.cityName,
       snapshot: record.snapshot,
       plant: normalizedPlant,
       lastFetchedAt: record.lastFetchedAt === undefined || record.lastFetchedAt === null ||
-        record.lastFetchedAt.length === 0 ? new Date().toISOString() : record.lastFetchedAt
+        record.lastFetchedAt.length === 0 ? '' : record.lastFetchedAt,
+      plantSpecies: species,
+      potStyle,
+      appearanceConfigured: record.appearanceConfigured === false ? false : true
     };
     if (!order.includes(record.cityKey)) {
       order.push(record.cityKey);
@@ -122,6 +137,23 @@ export class PlantStore {
   async getStoredPlant(cityKey: string): Promise<PlantState | null> {
     const record = await this.getCityRecord(cityKey);
     return record === null ? null : record.plant;
+  }
+
+  async saveCityAppearance(cityKey: string, species: PlantSpeciesId, potStyle: PotStyleId): Promise<void> {
+    const record = await this.getCityRecord(cityKey);
+    if (record === null) {
+      return;
+    }
+    await this.saveCityRecord({
+      cityKey: record.cityKey,
+      cityName: record.cityName,
+      snapshot: record.snapshot,
+      plant: record.plant,
+      lastFetchedAt: record.lastFetchedAt,
+      plantSpecies: this.normalizeSpecies(species),
+      potStyle: this.normalizePotStyle(potStyle),
+      appearanceConfigured: true
+    });
   }
 
   async deleteCityRecord(cityKey: string): Promise<void> {
@@ -230,8 +262,25 @@ export class PlantStore {
       cityName,
       snapshot: record.snapshot,
       plant,
-      lastFetchedAt: record.lastFetchedAt === undefined || record.lastFetchedAt === null ? '' : record.lastFetchedAt
+      lastFetchedAt: record.lastFetchedAt === undefined || record.lastFetchedAt === null ? '' : record.lastFetchedAt,
+      plantSpecies: this.normalizeSpecies(record.plantSpecies),
+      potStyle: this.normalizePotStyle(record.potStyle),
+      appearanceConfigured: record.appearanceConfigured === false ? false : true
     };
+  }
+
+  private normalizeSpecies(value: PlantSpeciesId | string): PlantSpeciesId {
+    if (value === undefined || value === null) {
+      return DEFAULT_PLANT_SPECIES;
+    }
+    return normalizePlantSpecies(String(value));
+  }
+
+  private normalizePotStyle(value: PotStyleId | string): PotStyleId {
+    if (value === undefined || value === null) {
+      return DEFAULT_POT_STYLE;
+    }
+    return normalizePotStyle(String(value));
   }
 
   private createInstallSeed(): string {
